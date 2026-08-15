@@ -1,0 +1,13 @@
+{
+  "domain": "home_inventory",
+  "name": "Home Inventory",
+  "version": "0.4.11",
+  "documentation": "https://github.com/local/home_inventory",
+  "issue_tracker": "https://github.com/local/home_inventory/issues",
+  "dependencies": ["http", "frontend"],
+  "codeowners": ["@sagi"],
+  "requirements": ["aiohttp>=3.8.0"],
+  "iot_class": "local_polling",
+  "config_flow": true,
+  "integration_type": "service"
+}

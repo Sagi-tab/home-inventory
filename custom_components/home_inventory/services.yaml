@@ -1,0 +1,385 @@
+scan_barcode:
+  name: Scan Barcode
+  description: Process a scanned barcode and add/remove from inventory.
+  fields:
+    barcode:
+      name: Barcode
+      required: true
+      example: "7290000066318"
+      selector: {text: {}}
+    action:
+      name: Action (legacy)
+      description: Use 'mode' instead. Kept for backward-compatibility.
+      default: add
+      selector:
+        select:
+          options: [add, remove]
+    mode:
+      name: Mode
+      description: >
+        High-level intent. 'stock_up' adds to inventory; 'deduct' removes.
+        Overrides 'action' when present.
+      selector:
+        select:
+          options: [stock_up, deduct]
+    quantity:
+      name: Quantity
+      default: 1
+      selector: {number: {min: 0.01, step: 0.1, mode: box}}
+    location:
+      name: Location
+      selector:
+        select:
+          options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
+    expiration_date:
+      name: Expiration date (YYYY-MM-DD)
+      selector: {date: {}}
+    add_to_shopping_list:
+      name: Add to shopping list (when removing)
+      selector: {boolean: {}}
+    product_name:
+      name: Product name (for unknown barcodes)
+      selector: {text: {}}
+    product_category:
+      name: Product category (for unknown barcodes)
+      selector:
+        select:
+          options:
+            - dairy
+            - bakery
+            - produce
+            - meat_fish
+            - frozen
+            - pantry
+            - beverages
+            - snacks
+            - cleaning
+            - personal_care
+            - other
+
+lookup_barcode:
+  name: Lookup Barcode
+  description: Look up a barcode without modifying inventory.
+  fields:
+    barcode:
+      name: Barcode
+      required: true
+      selector: {text: {}}
+
+add_item:
+  name: Add Item
+  description: Add an item by name (free text) to inventory or shopping list.
+  fields:
+    name:
+      name: Name
+      required: true
+      selector: {text: {}}
+    quantity:
+      name: Quantity
+      default: 1
+      selector: {number: {min: 0.01, step: 0.1, mode: box}}
+    unit:
+      name: Unit
+      default: pcs
+      selector: {text: {}}
+    category:
+      name: Category
+      selector:
+        select:
+          options:
+            - dairy
+            - bakery
+            - produce
+            - meat_fish
+            - frozen
+            - pantry
+            - beverages
+            - snacks
+            - cleaning
+            - personal_care
+            - other
+    location:
+      name: Location
+      selector:
+        select:
+          options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
+    expiration_date:
+      name: Expiration
+      selector: {date: {}}
+    threshold:
+      name: Low-stock threshold
+      selector: {number: {min: 0, step: 0.1, mode: box}}
+    notes:
+      name: Notes
+      selector: {text: {multiline: true}}
+    target:
+      name: Target
+      default: inventory
+      selector:
+        select:
+          options: [inventory, shopping]
+
+remove_item:
+  name: Remove Item
+  description: Remove quantity from an inventory product.
+  fields:
+    product_id:
+      name: Product ID
+      required: true
+      selector: {number: {mode: box}}
+    quantity:
+      name: Quantity
+      default: 1
+      selector: {number: {min: 0.01, step: 0.1, mode: box}}
+    location:
+      name: Location
+      selector:
+        select:
+          options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
+    add_to_shopping_list:
+      name: Also add to shopping list
+      selector: {boolean: {}}
+
+add_to_shopping:
+  name: Add to Shopping List
+  description: Add an item directly to the shopping list.
+  fields:
+    name:
+      name: Name
+      required: true
+      selector: {text: {}}
+    product_id:
+      name: Product ID (optional)
+      selector: {number: {mode: box}}
+    quantity:
+      name: Quantity
+      default: 1
+      selector: {number: {min: 0.01, step: 0.1, mode: box}}
+    category:
+      name: Category
+      selector:
+        select:
+          options:
+            - dairy
+            - bakery
+            - produce
+            - meat_fish
+            - frozen
+            - pantry
+            - beverages
+            - snacks
+            - cleaning
+            - personal_care
+            - other
+    notes:
+      name: Notes
+      selector: {text: {multiline: true}}
+
+complete_shopping_item:
+  name: Complete Shopping Item
+  description: Mark a shopping list item as purchased, optionally adding it to inventory.
+  fields:
+    item_id:
+      name: Shopping item ID
+      required: true
+      selector: {number: {mode: box}}
+    add_to_inventory:
+      name: Also add to inventory
+      selector: {boolean: {}}
+    location:
+      name: Location
+      selector:
+        select:
+          options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
+    expiration_date:
+      name: Expiration
+      selector: {date: {}}
+
+set_threshold:
+  name: Set Low-Stock Threshold
+  description: Set the low-stock threshold for a product.
+  fields:
+    product_id:
+      name: Product ID
+      required: true
+      selector: {number: {mode: box}}
+    threshold:
+      name: Threshold
+      required: true
+      selector: {number: {min: 0, step: 0.1, mode: box}}
+
+update_product:
+  name: Update Product (teach barcode)
+  description: Link a barcode to a product name (used when a scan returns unknown).
+  fields:
+    barcode:
+      name: Barcode
+      required: true
+      selector: {text: {}}
+    name:
+      name: Name
+      required: true
+      selector: {text: {}}
+    name_he:
+      name: Hebrew name
+      selector: {text: {}}
+    brand:
+      name: Brand
+      selector: {text: {}}
+    category:
+      name: Category
+      selector:
+        select:
+          options:
+            - dairy
+            - bakery
+            - produce
+            - meat_fish
+            - frozen
+            - pantry
+            - beverages
+            - snacks
+            - cleaning
+            - personal_care
+            - other
+    default_location:
+      name: Default location
+      selector:
+        select:
+          options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
+
+link_barcode:
+  name: Link Barcode to Product
+  description: >
+    Associate a barcode with an existing product. Used to group multiple
+    brands/SKUs of 'the same thing'.
+  fields:
+    barcode:
+      name: Barcode
+      required: true
+      selector: {text: {}}
+    product_id:
+      name: Product ID
+      required: true
+      selector: {number: {mode: box}}
+    brand:
+      name: Brand (specific to this barcode)
+      selector: {text: {}}
+    image_url:
+      name: Image URL
+      selector: {text: {}}
+
+unlink_barcode:
+  name: Unlink Barcode
+  description: Remove a barcode from its product (does not delete the product).
+  fields:
+    barcode:
+      name: Barcode
+      required: true
+      selector: {text: {}}
+
+merge_products:
+  name: Merge Products
+  description: >
+    Move all barcodes, inventory, shopping, and history from source product
+    into destination product. Source product is deleted.
+  fields:
+    src_product_id:
+      name: Source product ID (will be deleted)
+      required: true
+      selector: {number: {mode: box}}
+    dest_product_id:
+      name: Destination product ID (will receive everything)
+      required: true
+      selector: {number: {mode: box}}
+
+suggest_matches:
+  name: Suggest Matches
+  description: >
+    Find existing products similar to the provided attributes. Use when
+    deciding whether a new scan should be linked to an existing product.
+  fields:
+    barcode:
+      name: Barcode (optional)
+      selector: {text: {}}
+    name:
+      name: Name
+      selector: {text: {}}
+    name_he:
+      name: Hebrew name
+      selector: {text: {}}
+    category:
+      name: Category
+      selector:
+        select:
+          options:
+            - dairy
+            - bakery
+            - produce
+            - meat_fish
+            - frozen
+            - pantry
+            - beverages
+            - snacks
+            - cleaning
+            - personal_care
+            - other
+    brand:
+      name: Brand
+      selector: {text: {}}
+
+rename_product:
+  name: Rename / Edit Product
+  description: >
+    Edit a product's name, brand, category, etc. without touching
+    its barcodes or inventory. Pass empty string to clear a field.
+  fields:
+    product_id:
+      name: Product ID
+      required: true
+      selector: {number: {mode: box}}
+    name:
+      name: Name (English/generic)
+      selector: {text: {}}
+    name_he:
+      name: Name (Hebrew)
+      selector: {text: {}}
+    brand:
+      name: Default brand
+      selector: {text: {}}
+    category:
+      name: Category
+      selector:
+        select:
+          options:
+            - dairy
+            - bakery
+            - produce
+            - meat_fish
+            - frozen
+            - pantry
+            - beverages
+            - snacks
+            - cleaning
+            - personal_care
+            - other
+    default_location:
+      name: Default location
+      selector:
+        select:
+          options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
+
+update_shopping_quantity:
+  name: Update shopping item quantity
+  description: >
+    Set a shopping list row's quantity to an absolute value. Pass 0 (or
+    a negative number) to delete the row.
+  fields:
+    item_id:
+      name: Shopping item ID
+      required: true
+      selector: {number: {mode: box}}
+    quantity:
+      name: New quantity (0 deletes)
+      required: true
+      selector: {number: {min: 0, step: 0.1, mode: box}}

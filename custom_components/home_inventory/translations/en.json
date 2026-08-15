@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Home Inventory",
+        "description": "This will create the local database and register all services."
+      }
+    },
+    "abort": {
+      "already_configured": "Home Inventory is already set up."
+    }
+  },
+  "services": {
+    "scan_barcode": {"name": "Scan barcode", "description": "Process a barcode scan"},
+    "lookup_barcode": {"name": "Lookup barcode", "description": "Look up a barcode"},
+    "add_item": {"name": "Add item", "description": "Add item to inventory or shopping list"},
+    "remove_item": {"name": "Remove item", "description": "Remove inventory"},
+    "add_to_shopping": {"name": "Add to shopping list", "description": "Add a line to the shopping list"},
+    "complete_shopping_item": {"name": "Complete shopping item", "description": "Mark as purchased"},
+    "set_threshold": {"name": "Set threshold", "description": "Set low-stock threshold"},
+    "update_product": {"name": "Teach product", "description": "Save a product for a scanned barcode"}
+  }
+}

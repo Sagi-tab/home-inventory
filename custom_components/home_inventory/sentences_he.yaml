@@ -1,0 +1,29 @@
+language: "he"
+intents:
+  HomeInventoryAddShopping:
+    data:
+      - sentences:
+          - "הוסף {item} לרשימת קניות"
+          - "הוסיפי {item} לרשימת הקניות"
+          - "תוסיף {item} לקניות"
+  HomeInventoryAddItem:
+    data:
+      - sentences:
+          - "הוסף {item} למלאי"
+          - "תוסיף {item} למלאי"
+          - "הוסיפי {item} למזווה"
+  HomeInventoryRemoveItem:
+    data:
+      - sentences:
+          - "הסר {item} מהמלאי"
+          - "תוציא {item} מהמלאי"
+          - "השתמשתי ב{item}"
+  HomeInventoryQueryShopping:
+    data:
+      - sentences:
+          - "מה יש ברשימת הקניות"
+          - "מה ברשימת הקניות"
+          - "הקרא את רשימת הקניות"
+lists:
+  item:
+    wildcard: true

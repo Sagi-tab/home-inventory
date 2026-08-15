@@ -1,0 +1,77 @@
+blueprint:
+  name: Home Inventory - Daily Notifications
+  description: >
+    Sends a mobile notification if items are expiring soon or running low.
+    Runs once per day at the configured time.
+  domain: automation
+  source_url: https://local/home_inventory
+  input:
+    notify_service:
+      name: Notify service
+      description: The notify service to call, e.g. notify.mobile_app_sm_s926b
+      default: notify.mobile_app_sm_s926b
+      selector:
+        text:
+    run_time:
+      name: Time of day
+      description: When to run the daily check.
+      default: "08:00:00"
+      selector:
+        time:
+    notify_expiring:
+      name: Notify about expiring items
+      default: true
+      selector:
+        boolean:
+    notify_low_stock:
+      name: Notify about low stock
+      default: true
+      selector:
+        boolean:
+
+trigger:
+  - platform: time
+    at: !input run_time
+
+variables:
+  notify_service: !input notify_service
+  notify_expiring: !input notify_expiring
+  notify_low_stock: !input notify_low_stock
+  expiring: >
+    {{ state_attr('sensor.home_inventory_expiring_soon', 'items') or [] }}
+  low_stock: >
+    {{ state_attr('sensor.home_inventory_low_stock', 'items') or [] }}
+
+action:
+  - choose:
+      - conditions:
+          - "{{ notify_expiring and expiring | length > 0 }}"
+        sequence:
+          - service: "{{ notify_service }}"
+            data:
+              title: "🕒 Items expiring soon"
+              message: >
+                {{ expiring | length }} item(s) expiring within 3 days:
+                {% for i in expiring[:5] %}
+                • {{ i.name }} — {{ i.expires }}
+                {% endfor %}
+              data:
+                tag: home_inv_expiring
+                channel: Pantry
+  - choose:
+      - conditions:
+          - "{{ notify_low_stock and low_stock | length > 0 }}"
+        sequence:
+          - service: "{{ notify_service }}"
+            data:
+              title: "📉 Running low"
+              message: >
+                {{ low_stock | length }} item(s) below threshold:
+                {% for i in low_stock[:5] %}
+                • {{ i.name }} ({{ i.quantity }})
+                {% endfor %}
+              data:
+                tag: home_inv_lowstock
+                channel: Pantry
+
+mode: single

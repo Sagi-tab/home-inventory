@@ -1,0 +1,32 @@
+language: "en"
+intents:
+  HomeInventoryAddShopping:
+    data:
+      - sentences:
+          - "add {item} to the shopping list"
+          - "add {item} to my shopping list"
+          - "add {item} to shopping"
+          - "put {item} on the shopping list"
+  HomeInventoryAddItem:
+    data:
+      - sentences:
+          - "add {item} to inventory"
+          - "add {item} to the inventory"
+          - "add {item} to my pantry"
+  HomeInventoryRemoveItem:
+    data:
+      - sentences:
+          - "remove {item} from inventory"
+          - "remove {item} from the inventory"
+          - "use {item}"
+          - "used {item}"
+          - "take {item} out"
+  HomeInventoryQueryShopping:
+    data:
+      - sentences:
+          - "what's on the shopping list"
+          - "what is on my shopping list"
+          - "read the shopping list"
+lists:
+  item:
+    wildcard: true
