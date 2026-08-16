@@ -26,7 +26,8 @@
           "whatsapp_alert_time": "Daily alert time",
           "whatsapp_alert_days": "Alert for items expiring within (days)",
           "whatsapp_template_name": "Alert template name",
-          "whatsapp_template_language": "Alert template language code"
+          "whatsapp_template_language": "Alert template language code",
+          "whatsapp_template_parameter": "Alert template variable name, e.g. expired_items (leave blank if the template uses a numbered variable instead)"
         }
       }
     }

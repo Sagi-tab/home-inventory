@@ -40,11 +40,13 @@ from .const import (
     CONF_WA_PHONE_NUMBER_ID,
     CONF_WA_TEMPLATE_LANG,
     CONF_WA_TEMPLATE_NAME,
+    CONF_WA_TEMPLATE_PARAM,
     CONF_WA_VERIFY_TOKEN,
     DEFAULT_EXPIRING_DAYS,
     DEFAULT_WA_ALERT_TIME,
     DEFAULT_WA_TEMPLATE_LANG,
     DEFAULT_WA_TEMPLATE_NAME,
+    DEFAULT_WA_TEMPLATE_PARAM,
     DOMAIN,
     LLM_API_ID,
     WA_MAX_BODY,
@@ -127,11 +129,29 @@ class WhatsAppClient:
         )
 
     async def async_send_template(
-        self, to: str, body_param: str, *, name: str, language: str
+        self,
+        to: str,
+        body_param: str,
+        *,
+        name: str,
+        language: str,
+        parameter_name: str | None = None,
     ) -> bool:
-        """Send a pre-approved template with a single body variable."""
+        """Send a pre-approved template with a single body variable.
+
+        ``parameter_name`` selects the template's variable style. Named
+        variables ({{expired_items}}) require the name to be sent alongside the
+        value and must match the approved template exactly; omitting it sends a
+        positional variable ({{1}}) instead.
+        """
         if not self.configured:
             return False
+        parameter: dict[str, str] = {
+            "type": "text",
+            "text": body_param[:WA_MAX_BODY],
+        }
+        if parameter_name:
+            parameter["parameter_name"] = parameter_name
         return await self._post(
             {
                 "messaging_product": "whatsapp",
@@ -140,14 +160,7 @@ class WhatsAppClient:
                 "template": {
                     "name": name,
                     "language": {"code": language},
-                    "components": [
-                        {
-                            "type": "body",
-                            "parameters": [
-                                {"type": "text", "text": body_param[:WA_MAX_BODY]}
-                            ],
-                        }
-                    ],
+                    "components": [{"type": "body", "parameters": [parameter]}],
                 },
             }
         )
@@ -345,6 +358,8 @@ async def async_send_expiry_digest(hass: HomeAssistant) -> bool:
     body = _format_expiring(items)
     template = options.get(CONF_WA_TEMPLATE_NAME) or DEFAULT_WA_TEMPLATE_NAME
     language = options.get(CONF_WA_TEMPLATE_LANG) or DEFAULT_WA_TEMPLATE_LANG
+    # Missing key -> named default; explicitly blank -> positional {{1}}.
+    param_name = options.get(CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM)
 
     recipients = options.get(CONF_WA_ALLOWED_SENDERS) or []
     if isinstance(recipients, str):
@@ -356,7 +371,11 @@ async def async_send_expiry_digest(hass: HomeAssistant) -> bool:
         # Unprompted, so it must be a template - free-form text would be
         # rejected outside the 24h window.
         if await client.async_send_template(
-            recipient, body, name=template, language=language
+            recipient,
+            body,
+            name=template,
+            language=language,
+            parameter_name=param_name,
         ):
             sent = True
     return sent

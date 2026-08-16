@@ -25,8 +25,10 @@ from .const import (
     CONF_WA_VERIFY_TOKEN,
     DEFAULT_EXPIRING_DAYS,
     DEFAULT_WA_ALERT_TIME,
+    CONF_WA_TEMPLATE_PARAM,
     DEFAULT_WA_TEMPLATE_LANG,
     DEFAULT_WA_TEMPLATE_NAME,
+    DEFAULT_WA_TEMPLATE_PARAM,
     DOMAIN,
     WHATSAPP_WEBHOOK_PATH,
 )
@@ -117,6 +119,12 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                     CONF_WA_TEMPLATE_LANG,
                     default=options.get(
                         CONF_WA_TEMPLATE_LANG, DEFAULT_WA_TEMPLATE_LANG
+                    ),
+                ): selector.TextSelector(),
+                vol.Optional(
+                    CONF_WA_TEMPLATE_PARAM,
+                    default=options.get(
+                        CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM
                     ),
                 ): selector.TextSelector(),
             }
