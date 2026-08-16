@@ -59,9 +59,14 @@ CONF_WA_ALERT_TIME = "whatsapp_alert_time"
 CONF_WA_ALERT_DAYS = "whatsapp_alert_days"
 CONF_WA_TEMPLATE_NAME = "whatsapp_template_name"
 CONF_WA_TEMPLATE_LANG = "whatsapp_template_language"
+CONF_WA_TEMPLATE_PARAM = "whatsapp_template_parameter"
 
 DEFAULT_WA_TEMPLATE_NAME = "inventory_alert"
 DEFAULT_WA_TEMPLATE_LANG = "en"
+# Meta rejects templates whose body variable is a bare number when the value is
+# free text, so the template uses a named parameter ({{expired_items}}). Set
+# this to an empty string to fall back to a positional {{1}} template.
+DEFAULT_WA_TEMPLATE_PARAM = "expired_items"
 DEFAULT_WA_ALERT_TIME = "09:00:00"
 
 # The LLM tool API exposing inventory control to a conversation agent.
