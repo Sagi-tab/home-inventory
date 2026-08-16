@@ -1,7 +1,7 @@
 {
   "domain": "home_inventory",
   "name": "Home Inventory",
-  "version": "0.4.12",
+  "version": "0.5.0",
   "documentation": "https://github.com/local/home_inventory",
   "issue_tracker": "https://github.com/local/home_inventory/issues",
   "dependencies": ["http", "frontend"],

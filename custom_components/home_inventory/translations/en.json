@@ -10,7 +10,29 @@
       "already_configured": "Home Inventory is already set up."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WhatsApp bridge",
+        "description": "Control the inventory and receive expiry alerts over WhatsApp (Meta Cloud API).\n\nWebhook URL to register in the Meta app (Callback URL): {webhook}\n\nLeave token fields blank to keep the currently stored value.",
+        "data": {
+          "whatsapp_enabled": "Enable WhatsApp",
+          "whatsapp_phone_number_id": "Phone number ID",
+          "whatsapp_access_token": "Access token",
+          "whatsapp_verify_token": "Webhook verify token",
+          "whatsapp_app_secret": "App secret (signature verification)",
+          "whatsapp_allowed_senders": "Allowed sender numbers (comma-separated, country code first, no +)",
+          "whatsapp_agent_id": "Conversation agent",
+          "whatsapp_alert_time": "Daily alert time",
+          "whatsapp_alert_days": "Alert for items expiring within (days)",
+          "whatsapp_template_name": "Alert template name",
+          "whatsapp_template_language": "Alert template language code"
+        }
+      }
+    }
+  },
   "services": {
+    "send_expiry_alert": {"name": "Send expiry alert (WhatsApp)", "description": "Send the expiring-items digest now"},
     "scan_barcode": {"name": "Scan barcode", "description": "Process a barcode scan"},
     "lookup_barcode": {"name": "Lookup barcode", "description": "Look up a barcode"},
     "add_item": {"name": "Add item", "description": "Add item to inventory or shopping list"},

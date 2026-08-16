@@ -13,10 +13,12 @@ from homeassistant.core import HomeAssistant
 from .const import CARD_FILENAME, DOMAIN, FRONTEND_URL, PLATFORMS
 from .http_api import async_register_views
 from .intents import async_register_intents
+from .llm_api import async_register_llm_api
 from .lookup import BarcodeLookup
 from .seed_data import seed_if_empty
 from .services import async_register_services
 from .storage import Database
+from .whatsapp import async_setup_whatsapp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +44,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async_register_services(hass, db, lookup)
     async_register_views(hass)
     async_register_intents(hass)
+    async_register_llm_api(hass)
+    async_setup_whatsapp(hass, entry)
+
+    # Re-apply WhatsApp settings (and reschedule the digest) on options change.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     # Register the frontend static path first so the card JS is reachable.
     www_dir = Path(__file__).parent / "www"
@@ -135,8 +142,15 @@ async def _async_register_lovelace_resource(
         )
 
 
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply changed WhatsApp options without restarting Home Assistant."""
+    async_setup_whatsapp(hass, entry)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
+        if unsub := hass.data.get(DOMAIN, {}).get("wa_unsub_timer"):
+            unsub()
         hass.data.pop(DOMAIN, None)
     return unloaded
