@@ -25,6 +25,7 @@ SERVICE_COMPLETE_SHOPPING = "complete_shopping_item"
 SERVICE_SET_THRESHOLD = "set_threshold"
 SERVICE_LOOKUP_BARCODE = "lookup_barcode"
 SERVICE_UPDATE_PRODUCT = "update_product"
+SERVICE_SEND_EXPIRY_ALERT = "send_expiry_alert"
 
 # Event names
 EVENT_BARCODE_UNKNOWN = "home_inventory_barcode_unknown"
@@ -40,6 +41,35 @@ ACTION_REMOVE = "remove"
 API_BASE = "/api/home_inventory"
 FRONTEND_URL = "/home_inventory_static"
 CARD_FILENAME = "home-inventory-card.js"
+
+# ---------- WhatsApp (Meta Cloud API) ----------
+WHATSAPP_WEBHOOK_PATH = f"{API_BASE}/whatsapp"
+WHATSAPP_API_URL = "https://graph.facebook.com/v21.0/{phone_number_id}/messages"
+WHATSAPP_TIMEOUT = 15
+
+# Config entry option keys
+CONF_WA_ENABLED = "whatsapp_enabled"
+CONF_WA_PHONE_NUMBER_ID = "whatsapp_phone_number_id"
+CONF_WA_ACCESS_TOKEN = "whatsapp_access_token"
+CONF_WA_VERIFY_TOKEN = "whatsapp_verify_token"
+CONF_WA_APP_SECRET = "whatsapp_app_secret"
+CONF_WA_ALLOWED_SENDERS = "whatsapp_allowed_senders"
+CONF_WA_AGENT_ID = "whatsapp_agent_id"
+CONF_WA_ALERT_TIME = "whatsapp_alert_time"
+CONF_WA_ALERT_DAYS = "whatsapp_alert_days"
+CONF_WA_TEMPLATE_NAME = "whatsapp_template_name"
+CONF_WA_TEMPLATE_LANG = "whatsapp_template_language"
+
+DEFAULT_WA_TEMPLATE_NAME = "inventory_alert"
+DEFAULT_WA_TEMPLATE_LANG = "en"
+DEFAULT_WA_ALERT_TIME = "09:00:00"
+
+# The LLM tool API exposing inventory control to a conversation agent.
+LLM_API_ID = "home_inventory"
+LLM_API_NAME = "Home Inventory"
+
+# Max WhatsApp message body length (Meta caps text bodies at 4096).
+WA_MAX_BODY = 4000
 
 # Categories (used for seed + UI)
 CATEGORIES = [

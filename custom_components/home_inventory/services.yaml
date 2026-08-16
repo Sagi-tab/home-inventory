@@ -369,6 +369,13 @@ rename_product:
         select:
           options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
 
+send_expiry_alert:
+  name: Send Expiry Alert (WhatsApp)
+  description: >
+    Send the expiring-items digest over WhatsApp now, using the configured
+    template. Useful for testing the WhatsApp setup. Sends nothing if no
+    items are expiring within the configured window.
+
 update_shopping_quantity:
   name: Update shopping item quantity
   description: >

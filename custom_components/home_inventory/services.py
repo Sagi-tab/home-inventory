@@ -22,6 +22,7 @@ from .const import (
     SERVICE_LOOKUP_BARCODE,
     SERVICE_REMOVE_ITEM,
     SERVICE_SCAN_BARCODE,
+    SERVICE_SEND_EXPIRY_ALERT,
     SERVICE_SET_THRESHOLD,
     SERVICE_UPDATE_PRODUCT,
 )
@@ -604,6 +605,18 @@ def async_register_services(
             vol.Required("quantity"): vol.Coerce(float),
         }),
         supports_response="optional",
+    )
+
+    async def handle_send_expiry_alert(call: ServiceCall) -> dict:
+        # Imported here to keep the WhatsApp bridge optional at import time.
+        from .whatsapp import async_send_expiry_digest
+
+        sent = await async_send_expiry_digest(hass)
+        return {"sent": sent}
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_SEND_EXPIRY_ALERT, handle_send_expiry_alert,
+        schema=vol.Schema({}), supports_response="optional",
     )
 
     _LOGGER.debug("Registered Home Inventory services")
