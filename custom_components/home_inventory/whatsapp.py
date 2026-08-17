@@ -19,6 +19,7 @@ import hmac
 import logging
 from collections import deque
 from datetime import datetime, time as dt_time
+from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -73,6 +74,9 @@ class WhatsAppClient:
     def __init__(self, hass: HomeAssistant, options: dict) -> None:
         self.hass = hass
         self._options = options
+        # Meta's rejection reason from the most recent send, surfaced by the
+        # send_expiry_alert service so failures are diagnosable from the UI.
+        self.last_error: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -81,6 +85,17 @@ class WhatsAppClient:
             and self._options.get(CONF_WA_PHONE_NUMBER_ID)
             and self._options.get(CONF_WA_ACCESS_TOKEN)
         )
+
+    def missing_config(self) -> list[str]:
+        """Names of the settings still needed before anything can be sent."""
+        missing = []
+        if not self._options.get(CONF_WA_ENABLED):
+            missing.append("whatsapp_enabled")
+        if not self._options.get(CONF_WA_PHONE_NUMBER_ID):
+            missing.append("phone_number_id")
+        if not self._options.get(CONF_WA_ACCESS_TOKEN):
+            missing.append("access_token")
+        return missing
 
     @property
     def _url(self) -> str:
@@ -104,14 +119,17 @@ class WhatsAppClient:
                 if resp.status >= 400:
                     # Meta returns a JSON error body explaining the rejection
                     # (expired token, template not approved, outside the 24h
-                    # window, ...) - log it, it is the only diagnostic there is.
+                    # window, ...) - it is the only diagnostic there is.
                     body = await resp.text()
+                    self.last_error = f"HTTP {resp.status}: {body[:300]}"
                     _LOGGER.error(
                         "WhatsApp send failed (%s): %s", resp.status, body[:500]
                     )
                     return False
+                self.last_error = None
                 return True
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            self.last_error = str(err)
             _LOGGER.error("WhatsApp send error: %s", err)
             return False
 
@@ -340,20 +358,55 @@ def _parse_time(value: str) -> dt_time:
     return datetime.strptime(DEFAULT_WA_ALERT_TIME, "%H:%M:%S").time()
 
 
-async def async_send_expiry_digest(hass: HomeAssistant) -> bool:
-    """Send the expiring-items digest now. Returns True if a message was sent."""
+async def async_send_expiry_digest(
+    hass: HomeAssistant, *, as_text: bool = False
+) -> dict[str, Any]:
+    """Send the expiring-items digest now.
+
+    Returns a result dict rather than a bare boolean: "nothing was sent" has
+    several very different causes (not configured, nothing expiring, Meta
+    rejected it) and the caller needs to tell them apart.
+
+    ``as_text`` sends the digest as a free-form message instead of the
+    template. That only works inside the 24h window opened by the user's own
+    message, but it allows the digest to be tested before Meta has approved
+    the template.
+    """
     data = hass.data.get(DOMAIN, {})
     client: WhatsAppClient | None = data.get("wa_client")
     options: dict = data.get("wa_options", {})
     db: Database | None = data.get("db")
-    if client is None or db is None or not client.configured:
-        return False
+
+    if client is None or db is None:
+        return {"sent": False, "reason": "integration_not_ready"}
+
+    if not client.configured:
+        missing = client.missing_config()
+        _LOGGER.warning("WhatsApp digest skipped; missing config: %s", missing)
+        return {"sent": False, "reason": "not_configured", "missing": missing}
 
     days = int(options.get(CONF_WA_ALERT_DAYS) or DEFAULT_EXPIRING_DAYS)
     items = await db.get_expiring_items(days)
     if not items:
-        _LOGGER.debug("No expiring items; skipping WhatsApp digest")
-        return False
+        # By far the most common reason for "nothing happened", so say it at a
+        # level the user actually sees rather than hiding it behind debug.
+        _LOGGER.info(
+            "No items expiring within %s days; nothing to send", days
+        )
+        return {
+            "sent": False,
+            "reason": "no_expiring_items",
+            "days": days,
+            "item_count": 0,
+        }
+
+    recipients = options.get(CONF_WA_ALLOWED_SENDERS) or []
+    if isinstance(recipients, str):
+        recipients = [p.strip() for p in recipients.split(",")]
+    recipients = [p for p in recipients if str(p).strip()]
+    if not recipients:
+        _LOGGER.warning("WhatsApp digest skipped; no recipient numbers configured")
+        return {"sent": False, "reason": "no_recipients", "item_count": len(items)}
 
     body = _format_expiring(items)
     template = options.get(CONF_WA_TEMPLATE_NAME) or DEFAULT_WA_TEMPLATE_NAME
@@ -361,24 +414,37 @@ async def async_send_expiry_digest(hass: HomeAssistant) -> bool:
     # Missing key -> named default; explicitly blank -> positional {{1}}.
     param_name = options.get(CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM)
 
-    recipients = options.get(CONF_WA_ALLOWED_SENDERS) or []
-    if isinstance(recipients, str):
-        recipients = [p.strip() for p in recipients.split(",")]
-    recipients = [p for p in recipients if str(p).strip()]
-
-    sent = False
+    delivered: list[str] = []
     for recipient in recipients:
-        # Unprompted, so it must be a template - free-form text would be
-        # rejected outside the 24h window.
-        if await client.async_send_template(
-            recipient,
-            body,
-            name=template,
-            language=language,
-            parameter_name=param_name,
-        ):
-            sent = True
-    return sent
+        if as_text:
+            ok = await client.async_send_text(recipient, body)
+        else:
+            # Unprompted, so it must be a template - free-form text would be
+            # rejected outside the 24h window.
+            ok = await client.async_send_template(
+                recipient,
+                body,
+                name=template,
+                language=language,
+                parameter_name=param_name,
+            )
+        if ok:
+            delivered.append(recipient)
+
+    result: dict[str, Any] = {
+        "sent": bool(delivered),
+        "reason": "sent" if delivered else "send_failed",
+        "item_count": len(items),
+        "recipients": len(recipients),
+        "delivered": len(delivered),
+        "mode": "text" if as_text else "template",
+        "preview": body,
+    }
+    if not delivered:
+        result["error"] = client.last_error or "unknown"
+        if not as_text:
+            result["template"] = template
+    return result
 
 
 @callback

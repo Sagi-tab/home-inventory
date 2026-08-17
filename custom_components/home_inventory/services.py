@@ -611,12 +611,14 @@ def async_register_services(
         # Imported here to keep the WhatsApp bridge optional at import time.
         from .whatsapp import async_send_expiry_digest
 
-        sent = await async_send_expiry_digest(hass)
-        return {"sent": sent}
+        return await async_send_expiry_digest(
+            hass, as_text=bool(call.data.get("as_text", False))
+        )
 
     hass.services.async_register(
         DOMAIN, SERVICE_SEND_EXPIRY_ALERT, handle_send_expiry_alert,
-        schema=vol.Schema({}), supports_response="optional",
+        schema=vol.Schema({vol.Optional("as_text"): cv.boolean}),
+        supports_response="optional",
     )
 
     _LOGGER.debug("Registered Home Inventory services")
