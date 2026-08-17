@@ -372,9 +372,20 @@ rename_product:
 send_expiry_alert:
   name: Send Expiry Alert (WhatsApp)
   description: >
-    Send the expiring-items digest over WhatsApp now, using the configured
-    template. Useful for testing the WhatsApp setup. Sends nothing if no
-    items are expiring within the configured window.
+    Send the expiring-items digest over WhatsApp now. Returns a result with
+    'sent' plus a 'reason' explaining why nothing was sent (not_configured,
+    no_expiring_items, no_recipients, send_failed), the digest 'preview',
+    and Meta's error text on failure.
+  fields:
+    as_text:
+      name: Send as plain text
+      description: >
+        Send the digest as a free-form message instead of the approved
+        template. Only works within 24 hours of your last incoming WhatsApp
+        message, but lets you test the digest before Meta approves the
+        template.
+      default: false
+      selector: {boolean: {}}
 
 update_shopping_quantity:
   name: Update shopping item quantity
