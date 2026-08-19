@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 from collections import deque
 from datetime import datetime, time as dt_time
 from typing import Any
@@ -51,6 +52,7 @@ from .const import (
     DOMAIN,
     LLM_API_ID,
     WA_MAX_BODY,
+    WA_MAX_TEMPLATE_PARAM,
     WHATSAPP_API_URL,
     WHATSAPP_TIMEOUT,
     WHATSAPP_WEBHOOK_PATH,
@@ -61,6 +63,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # Remember recently handled message ids so Meta's retries are no-ops.
 _SEEN_MAX = 200
+
+_WHITESPACE_RE = re.compile(r"\s+")
+_TEMPLATE_SEPARATOR = " • "
 
 
 def _digits(value: str) -> str:
@@ -164,9 +169,11 @@ class WhatsAppClient:
         """
         if not self.configured:
             return False
+        # Defensive: Meta rejects the whole send (132018) if a parameter carries
+        # a newline, tab or a long run of spaces, whatever the caller passed.
         parameter: dict[str, str] = {
             "type": "text",
-            "text": body_param[:WA_MAX_BODY],
+            "text": _collapse_whitespace(body_param)[:WA_MAX_TEMPLATE_PARAM],
         }
         if parameter_name:
             parameter["parameter_name"] = parameter_name
@@ -331,22 +338,65 @@ class WhatsAppWebhookView(HomeAssistantView):
         await client.async_send_text(to, body)
 
 
-def _format_expiring(items: list[dict]) -> str:
-    """Render expiring rows as a compact WhatsApp-friendly list."""
-    lines = []
+def _collapse_whitespace(text: str) -> str:
+    """Flatten whitespace so a value is safe to use as a template parameter."""
+    return _WHITESPACE_RE.sub(" ", str(text)).strip()
+
+
+def _entries(items: list[dict]) -> list[str]:
+    """One sanitised description per expiring row, without a bullet."""
+    entries = []
     for item in items:
         name = item.get("product_name") or item.get("product_name_he") or "Item"
         qty = item.get("quantity")
         expires = item.get("expiration_date") or "?"
         location = item.get("location")
-        parts = [f"• {name}"]
+        parts = [str(name)]
         if qty:
             parts.append(f"x{qty:g}" if isinstance(qty, (int, float)) else f"x{qty}")
         parts.append(f"— {expires}")
         if location:
             parts.append(f"({location})")
-        lines.append(" ".join(parts))
-    return "\n".join(lines)
+        entries.append(_collapse_whitespace(" ".join(parts)))
+    return entries
+
+
+def _join_for_template(entries: list[str], limit: int) -> str:
+    """Join entries onto one line, dropping the overflow into a "+N more" tail."""
+    kept: list[str] = []
+    used = 0
+    for index, entry in enumerate(entries):
+        cost = len(entry) + (len(_TEMPLATE_SEPARATOR) if kept else 0)
+        remaining = len(entries) - index - 1
+        tail = len(f" (+{remaining} more)") if remaining else 0
+        if used + cost + tail > limit:
+            break
+        kept.append(entry)
+        used += cost
+
+    if not kept:
+        # A single oversized entry still beats sending nothing at all.
+        return entries[0][: limit - 1].rstrip() + "…" if entries else ""
+
+    joined = _TEMPLATE_SEPARATOR.join(kept)
+    dropped = len(entries) - len(kept)
+    if dropped:
+        joined += f" (+{dropped} more)"
+    return joined
+
+
+def _format_expiring(items: list[dict], *, multiline: bool = True) -> str:
+    """Render expiring rows as a WhatsApp-friendly list.
+
+    Template parameters may not contain newlines, tabs or runs of more than
+    four spaces (Meta error 132018), and the rendered body is capped at 1024
+    characters - so the template form is a single sanitised line. Free-form
+    text messages have no such restriction and stay one item per line.
+    """
+    entries = _entries(items)
+    if multiline:
+        return "\n".join(f"• {entry}" for entry in entries)
+    return _join_for_template(entries, WA_MAX_TEMPLATE_PARAM)
 
 
 def _parse_time(value: str) -> dt_time:
@@ -408,7 +458,9 @@ async def async_send_expiry_digest(
         _LOGGER.warning("WhatsApp digest skipped; no recipient numbers configured")
         return {"sent": False, "reason": "no_recipients", "item_count": len(items)}
 
-    body = _format_expiring(items)
+    # One item per line for free-form text; a single sanitised line for the
+    # template, whose parameter may not contain newlines.
+    body = _format_expiring(items, multiline=as_text)
     template = options.get(CONF_WA_TEMPLATE_NAME) or DEFAULT_WA_TEMPLATE_NAME
     language = options.get(CONF_WA_TEMPLATE_LANG) or DEFAULT_WA_TEMPLATE_LANG
     # Missing key -> named default; explicitly blank -> positional {{1}}.

@@ -75,6 +75,9 @@ LLM_API_NAME = "Home Inventory"
 
 # Max WhatsApp message body length (Meta caps text bodies at 4096).
 WA_MAX_BODY = 4000
+# A rendered template body may not exceed 1024 characters including the
+# template's own static text, so the variable is held well under that.
+WA_MAX_TEMPLATE_PARAM = 900
 
 # Categories (used for seed + UI)
 CATEGORIES = [
