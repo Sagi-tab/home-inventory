@@ -25,6 +25,7 @@ from .const import (
     SERVICE_SEND_EXPIRY_ALERT,
     SERVICE_SET_THRESHOLD,
     SERVICE_UPDATE_PRODUCT,
+    SERVICE_WA_DIAGNOSTICS,
 )
 from .lookup import BarcodeLookup
 from .storage import Database
@@ -619,6 +620,16 @@ def async_register_services(
         DOMAIN, SERVICE_SEND_EXPIRY_ALERT, handle_send_expiry_alert,
         schema=vol.Schema({vol.Optional("as_text"): cv.boolean}),
         supports_response="optional",
+    )
+
+    async def handle_whatsapp_diagnostics(call: ServiceCall) -> dict:
+        from .whatsapp import async_whatsapp_diagnostics
+
+        return await async_whatsapp_diagnostics(hass)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_WA_DIAGNOSTICS, handle_whatsapp_diagnostics,
+        schema=vol.Schema({}), supports_response="only",
     )
 
     _LOGGER.debug("Registered Home Inventory services")
