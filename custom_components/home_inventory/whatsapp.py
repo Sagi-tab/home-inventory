@@ -31,6 +31,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.network import NoURLAvailableError, get_url
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_WA_ACCESS_TOKEN,
@@ -81,6 +82,21 @@ def _mask(number: str | None) -> str:
     if len(digits) <= 6:
         return "***"
     return f"{digits[:3]}***{digits[-4:]}"
+
+
+def _record(hass: HomeAssistant, event: str, detail: str | None = None) -> None:
+    """Count inbound webhook activity so it can be inspected without logs.
+
+    Home Assistant's log panel only renders warnings and above, so the info
+    level trace is easy to miss. These counters make "did anything ever
+    arrive?" answerable straight from the diagnostics service.
+    """
+    stats = hass.data.setdefault(DOMAIN, {}).setdefault(
+        "wa_stats", {"counts": {}, "last_event": None, "last_event_at": None}
+    )
+    stats["counts"][event] = stats["counts"].get(event, 0) + 1
+    stats["last_event"] = f"{event}: {detail}" if detail else event
+    stats["last_event_at"] = dt_util.utcnow().isoformat(timespec="seconds")
 
 
 def _trace(options: dict, msg: str, *args: Any) -> None:
@@ -261,12 +277,14 @@ class WhatsAppWebhookView(HomeAssistantView):
             )
         ):
             _trace(self._options, "verification handshake accepted")
+            _record(self.hass, "verification_accepted")
             return web.Response(text=params.get("hub.challenge", ""))
         _LOGGER.warning(
             "WhatsApp webhook verification failed (mode=%s, verify token %s)",
             params.get("hub.mode"),
             "configured" if verify_token else "MISSING in options",
         )
+        _record(self.hass, "verification_failed")
         return web.Response(status=403, text="verification failed")
 
     def _signature_ok(self, raw: bytes, header: str | None) -> bool:
@@ -291,13 +309,16 @@ class WhatsAppWebhookView(HomeAssistantView):
     async def post(self, request: web.Request) -> web.Response:
         raw = await request.read()
         _trace(self._options, "POST received (%s bytes)", len(raw))
+        _record(self.hass, "post_received", f"{len(raw)} bytes")
         if not self._signature_ok(raw, request.headers.get("X-Hub-Signature-256")):
             _LOGGER.warning("WhatsApp webhook signature rejected")
+            _record(self.hass, "rejected_bad_signature")
             return web.Response(status=403, text="bad signature")
 
         try:
             payload = await request.json()
         except ValueError:
+            _record(self.hass, "rejected_bad_json")
             return web.Response(status=400, text="bad json")
 
         # Always 200 quickly so Meta stops retrying; process in the background.
@@ -320,6 +341,11 @@ class WhatsAppWebhookView(HomeAssistantView):
                         "payload carried no messages (field=%s, keys=%s)",
                         change.get("field"),
                         sorted(value.keys()),
+                    )
+                    _record(
+                        self.hass,
+                        "payload_without_messages",
+                        ",".join(sorted(value.keys())) or "empty",
                     )
                     continue
                 for message in value["messages"]:
@@ -348,11 +374,13 @@ class WhatsAppWebhookView(HomeAssistantView):
                 return
             self._seen.append(msg_id)
 
+        _record(self.hass, "message_received", f"from {_mask(sender)}")
         if not self._sender_allowed(sender):
             _LOGGER.warning(
                 "Ignoring WhatsApp message from %s (not in allowed senders)",
                 _mask(sender),
             )
+            _record(self.hass, "rejected_sender_not_allowed", _mask(sender))
             return
 
         if message.get("type") != "text":
@@ -428,6 +456,11 @@ class WhatsAppWebhookView(HomeAssistantView):
         ok = await client.async_send_text(to, body)
         _trace(self._options, "reply to %s %s", _mask(to),
                "sent" if ok else f"FAILED: {client.last_error}")
+        _record(
+            self.hass,
+            "reply_sent" if ok else "reply_failed",
+            None if ok else client.last_error,
+        )
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -615,6 +648,9 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
     days = int(options.get(CONF_WA_ALERT_DAYS) or DEFAULT_EXPIRING_DAYS)
     expiring = len(await db.get_expiring_items(days)) if db else None
 
+    stats = data.get(
+        "wa_stats", {"counts": {}, "last_event": None, "last_event_at": None}
+    )
     missing_inbound = missing_inbound_config(options)
     if missing_inbound:
         _LOGGER.warning(
@@ -656,6 +692,12 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
             CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM
         ),
         "last_send_error": client.last_error if client else None,
+        # Inbound activity since the last restart. All-zero counts mean Meta
+        # has never delivered anything, which is a Meta-side problem rather
+        # than anything to fix in Home Assistant.
+        "inbound_activity": stats["counts"] or "nothing received since restart",
+        "inbound_last_event": stats["last_event"],
+        "inbound_last_event_at": stats["last_event_at"],
     }
 
 
