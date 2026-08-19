@@ -115,7 +115,7 @@ class WhatsAppClient:
         )
 
     def missing_config(self) -> list[str]:
-        """Names of the settings still needed before anything can be sent."""
+        """Settings still needed before a message can be sent out."""
         missing = []
         if not self._options.get(CONF_WA_ENABLED):
             missing.append("whatsapp_enabled")
@@ -214,6 +214,26 @@ class WhatsAppClient:
         )
 
 
+def missing_inbound_config(options: dict) -> list[str]:
+    """Settings still needed before an incoming message can be accepted.
+
+    Separate from the outbound list: sending can be fully configured while
+    every incoming message is still rejected, which is exactly the state that
+    looks like "nothing happens" from the outside.
+    """
+    missing = []
+    if not options.get(CONF_WA_APP_SECRET):
+        missing.append("app_secret")
+    if not options.get(CONF_WA_VERIFY_TOKEN):
+        missing.append("verify_token")
+    senders = options.get(CONF_WA_ALLOWED_SENDERS) or []
+    if isinstance(senders, str):
+        senders = [p.strip() for p in senders.split(",")]
+    if not [p for p in senders if str(p).strip()]:
+        missing.append("allowed_senders")
+    return missing
+
+
 class WhatsAppWebhookView(HomeAssistantView):
     """Receives Meta webhook callbacks. Unauthenticated by necessity."""
 
@@ -255,7 +275,11 @@ class WhatsAppWebhookView(HomeAssistantView):
         if not secret:
             # No secret configured - cannot verify, so refuse rather than
             # accept unauthenticated writes on a public endpoint.
-            _LOGGER.error("WhatsApp app secret not configured; rejecting webhook")
+            _LOGGER.error(
+                "Rejecting WhatsApp webhook: no app secret configured, so no "
+                "incoming message can be verified. Set it in the Home "
+                "Inventory options (Meta: App settings -> Basic -> App secret)"
+            )
             return False
         if not header or not header.startswith("sha256="):
             return False
@@ -591,6 +615,13 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
     days = int(options.get(CONF_WA_ALERT_DAYS) or DEFAULT_EXPIRING_DAYS)
     expiring = len(await db.get_expiring_items(days)) if db else None
 
+    missing_inbound = missing_inbound_config(options)
+    if missing_inbound:
+        _LOGGER.warning(
+            "WhatsApp cannot accept incoming messages; missing: %s",
+            ", ".join(missing_inbound),
+        )
+
     agent = options.get(CONF_WA_AGENT_ID)
     return {
         "enabled": bool(options.get(CONF_WA_ENABLED)),
@@ -604,7 +635,13 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
         "access_token_set": bool(options.get(CONF_WA_ACCESS_TOKEN)),
         "verify_token_set": bool(options.get(CONF_WA_VERIFY_TOKEN)),
         "app_secret_set": bool(options.get(CONF_WA_APP_SECRET)),
-        "missing_config": client.missing_config() if client else ["client_not_setup"],
+        "missing_for_sending": (
+            client.missing_config() if client else ["client_not_setup"]
+        ),
+        # Inbound is reported separately: outbound can be perfectly configured
+        # while every incoming message is rejected.
+        "missing_for_receiving": missing_inbound,
+        "inbound_ready": not missing_inbound,
         "recipients": [_mask(s) for s in senders],
         "conversation_agent": agent or "<default agent>",
         "agent_configured": bool(agent),
@@ -647,6 +684,15 @@ def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     if not options.get(CONF_WA_ENABLED):
         return
+
+    # Surface an inbound misconfiguration at startup: without these, incoming
+    # messages are rejected silently as far as the user can tell.
+    if missing := missing_inbound_config(options):
+        _LOGGER.warning(
+            "WhatsApp is enabled but incoming messages will be rejected; "
+            "missing: %s",
+            ", ".join(missing),
+        )
 
     alert_at = _parse_time(options.get(CONF_WA_ALERT_TIME) or DEFAULT_WA_ALERT_TIME)
 
