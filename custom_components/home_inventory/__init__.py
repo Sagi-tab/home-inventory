@@ -1,7 +1,6 @@
 """Home Inventory integration."""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -9,6 +8,7 @@ from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
 
 from .const import CARD_FILENAME, DOMAIN, FRONTEND_URL, PLATFORMS
 from .http_api import async_register_views
@@ -56,11 +56,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         StaticPathConfig(FRONTEND_URL, str(www_dir), cache_headers=False)
     ])
 
-    # Read version for cache-busting
-    manifest_path = Path(__file__).parent / "manifest.json"
+    # Version is used to cache-bust the card URL. Read it from the already
+    # loaded integration rather than the manifest file: opening the file here
+    # would be blocking I/O inside the event loop.
     try:
-        version = json.loads(manifest_path.read_text()).get("version", "0")
-    except Exception:
+        integration = await async_get_integration(hass, DOMAIN)
+        version = str(integration.version or "0")
+    except Exception:  # noqa: BLE001 - cache busting must never block setup
         version = "0"
     card_url = f"{FRONTEND_URL}/{CARD_FILENAME}?v={version}"
 
