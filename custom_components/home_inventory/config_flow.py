@@ -25,6 +25,7 @@ from .const import (
     CONF_WA_VERIFY_TOKEN,
     DEFAULT_EXPIRING_DAYS,
     DEFAULT_WA_ALERT_TIME,
+    CONF_WA_DEBUG,
     CONF_WA_TEMPLATE_PARAM,
     DEFAULT_WA_TEMPLATE_LANG,
     DEFAULT_WA_TEMPLATE_NAME,
@@ -127,6 +128,10 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                         CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM
                     ),
                 ): selector.TextSelector(),
+                vol.Optional(
+                    CONF_WA_DEBUG,
+                    default=options.get(CONF_WA_DEBUG, False),
+                ): selector.BooleanSelector(),
             }
         )
         # Show the exact callback URL to paste into the Meta app config.

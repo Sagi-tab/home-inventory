@@ -27,13 +27,15 @@
           "whatsapp_alert_days": "Alert for items expiring within (days)",
           "whatsapp_template_name": "Alert template name",
           "whatsapp_template_language": "Alert template language code",
-          "whatsapp_template_parameter": "Alert template variable name, e.g. expired_items (leave blank if the template uses a numbered variable instead)"
+          "whatsapp_template_parameter": "Alert template variable name, e.g. expired_items (leave blank if the template uses a numbered variable instead)",
+          "whatsapp_debug": "Verbose logging (logs each incoming message, the agent reply and the send result to the Home Assistant log)"
         }
       }
     }
   },
   "services": {
     "send_expiry_alert": {"name": "Send expiry alert (WhatsApp)", "description": "Send the expiring-items digest now"},
+    "whatsapp_diagnostics": {"name": "WhatsApp diagnostics", "description": "Report the resolved WhatsApp configuration"},
     "scan_barcode": {"name": "Scan barcode", "description": "Process a barcode scan"},
     "lookup_barcode": {"name": "Lookup barcode", "description": "Look up a barcode"},
     "add_item": {"name": "Add item", "description": "Add item to inventory or shopping list"},

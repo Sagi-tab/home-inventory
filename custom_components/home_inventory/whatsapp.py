@@ -30,10 +30,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
     CONF_WA_ACCESS_TOKEN,
     CONF_WA_AGENT_ID,
+    CONF_WA_DEBUG,
     CONF_WA_ALERT_DAYS,
     CONF_WA_ALERT_TIME,
     CONF_WA_ALLOWED_SENDERS,
@@ -71,6 +73,27 @@ _TEMPLATE_SEPARATOR = " • "
 def _digits(value: str) -> str:
     """Normalise a phone number to digits only for comparison."""
     return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _mask(number: str | None) -> str:
+    """Partially mask a phone number so logs stay shareable."""
+    digits = _digits(number or "")
+    if len(digits) <= 6:
+        return "***"
+    return f"{digits[:3]}***{digits[-4:]}"
+
+
+def _trace(options: dict, msg: str, *args: Any) -> None:
+    """Log the message flow.
+
+    With the debug toggle on this logs at info so it shows up in the default
+    Home Assistant log; otherwise it stays at debug. That saves the user
+    editing configuration.yaml just to see why a message went nowhere.
+    """
+    if options.get(CONF_WA_DEBUG):
+        _LOGGER.info("[whatsapp] " + msg, *args)
+    else:
+        _LOGGER.debug("[whatsapp] " + msg, *args)
 
 
 class WhatsAppClient:
@@ -217,8 +240,13 @@ class WhatsAppWebhookView(HomeAssistantView):
                 str(params.get("hub.verify_token", "")), str(verify_token)
             )
         ):
+            _trace(self._options, "verification handshake accepted")
             return web.Response(text=params.get("hub.challenge", ""))
-        _LOGGER.warning("WhatsApp webhook verification failed")
+        _LOGGER.warning(
+            "WhatsApp webhook verification failed (mode=%s, verify token %s)",
+            params.get("hub.mode"),
+            "configured" if verify_token else "MISSING in options",
+        )
         return web.Response(status=403, text="verification failed")
 
     def _signature_ok(self, raw: bytes, header: str | None) -> bool:
@@ -238,6 +266,7 @@ class WhatsAppWebhookView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         raw = await request.read()
+        _trace(self._options, "POST received (%s bytes)", len(raw))
         if not self._signature_ok(raw, request.headers.get("X-Hub-Signature-256")):
             _LOGGER.warning("WhatsApp webhook signature rejected")
             return web.Response(status=403, text="bad signature")
@@ -252,32 +281,59 @@ class WhatsAppWebhookView(HomeAssistantView):
         return web.Response(text="ok")
 
     async def _async_handle_payload(self, payload: dict) -> None:
+        options = self._options
+        handled = 0
         for entry in payload.get("entry", []) or []:
             for change in entry.get("changes", []) or []:
                 value = change.get("value") or {}
                 # Delivery/read receipts arrive on the same webhook - ignore.
                 if not value.get("messages"):
+                    # Worth surfacing: receipts arriving while messages never do
+                    # means the webhook works but the 'messages' field is not
+                    # subscribed in the Meta app configuration.
+                    _trace(
+                        options,
+                        "payload carried no messages (field=%s, keys=%s)",
+                        change.get("field"),
+                        sorted(value.keys()),
+                    )
                     continue
                 for message in value["messages"]:
+                    handled += 1
                     try:
                         await self._async_handle_message(message)
                     except Exception:  # noqa: BLE001 - never break the loop
                         _LOGGER.exception("Error handling WhatsApp message")
+        _trace(options, "payload processed, %s message(s)", handled)
 
     async def _async_handle_message(self, message: dict) -> None:
+        options = self._options
         msg_id = message.get("id")
+        sender = message.get("from")
+        _trace(
+            options,
+            "message %s from %s type=%s",
+            msg_id,
+            _mask(sender),
+            message.get("type"),
+        )
+
         if msg_id:
             if msg_id in self._seen:
-                _LOGGER.debug("Ignoring duplicate WhatsApp message %s", msg_id)
+                _trace(options, "duplicate %s ignored (Meta retry)", msg_id)
                 return
             self._seen.append(msg_id)
 
-        sender = message.get("from")
         if not self._sender_allowed(sender):
-            _LOGGER.warning("Ignoring WhatsApp message from %s (not allowed)", sender)
+            _LOGGER.warning(
+                "Ignoring WhatsApp message from %s (not in allowed senders)",
+                _mask(sender),
+            )
             return
 
         if message.get("type") != "text":
+            _trace(options, "non-text message (%s), replying with a hint",
+                   message.get("type"))
             await self._async_reply(
                 sender, "I can only read text messages right now."
             )
@@ -285,11 +341,20 @@ class WhatsAppWebhookView(HomeAssistantView):
 
         text = (message.get("text") or {}).get("body", "").strip()
         if not text:
+            _trace(options, "empty text body, nothing to do")
             return
 
+        _trace(options, "asking agent %r: %r",
+               options.get(CONF_WA_AGENT_ID) or "<default>", text[:200])
         answer = await self._async_converse(text, sender)
+        _trace(options, "agent answered: %r", (answer or "")[:200])
         if answer:
             await self._async_reply(sender, answer)
+        else:
+            _LOGGER.warning(
+                "Conversation agent returned no reply for %s; nothing sent",
+                _mask(sender),
+            )
 
     def _sender_allowed(self, sender: str | None) -> bool:
         if not sender:
@@ -332,10 +397,13 @@ class WhatsAppWebhookView(HomeAssistantView):
     async def _async_reply(self, to: str, body: str) -> None:
         client: WhatsAppClient | None = self.hass.data.get(DOMAIN, {}).get("wa_client")
         if client is None:
+            _LOGGER.error("Cannot reply: WhatsApp client not set up")
             return
         # The user just messaged us, so the 24h window is open: plain text is
         # allowed here and no template is needed.
-        await client.async_send_text(to, body)
+        ok = await client.async_send_text(to, body)
+        _trace(self._options, "reply to %s %s", _mask(to),
+               "sent" if ok else f"FAILED: {client.last_error}")
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -497,6 +565,61 @@ async def async_send_expiry_digest(
         if not as_text:
             result["template"] = template
     return result
+
+
+async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
+    """Summarise the resolved WhatsApp setup, without revealing secrets.
+
+    Reports only whether each secret is present, never its value, so the
+    output is safe to paste when asking for help.
+    """
+    data = hass.data.get(DOMAIN, {})
+    options: dict = data.get("wa_options", {})
+    client: WhatsAppClient | None = data.get("wa_client")
+    db: Database | None = data.get("db")
+
+    senders = options.get(CONF_WA_ALLOWED_SENDERS) or []
+    if isinstance(senders, str):
+        senders = [p.strip() for p in senders.split(",")]
+    senders = [p for p in senders if str(p).strip()]
+
+    try:
+        webhook_url = f"{get_url(hass, prefer_external=True)}{WHATSAPP_WEBHOOK_PATH}"
+    except NoURLAvailableError:
+        webhook_url = f"(no external URL configured){WHATSAPP_WEBHOOK_PATH}"
+
+    days = int(options.get(CONF_WA_ALERT_DAYS) or DEFAULT_EXPIRING_DAYS)
+    expiring = len(await db.get_expiring_items(days)) if db else None
+
+    agent = options.get(CONF_WA_AGENT_ID)
+    return {
+        "enabled": bool(options.get(CONF_WA_ENABLED)),
+        "webhook_url": webhook_url,
+        "webhook_registered": bool(data.get("wa_view_registered")),
+        "llm_api_registered": bool(data.get("llm_api_registered")),
+        "llm_api_id": LLM_API_ID,
+        "debug_logging": bool(options.get(CONF_WA_DEBUG)),
+        # Presence only - never the values themselves.
+        "phone_number_id_set": bool(options.get(CONF_WA_PHONE_NUMBER_ID)),
+        "access_token_set": bool(options.get(CONF_WA_ACCESS_TOKEN)),
+        "verify_token_set": bool(options.get(CONF_WA_VERIFY_TOKEN)),
+        "app_secret_set": bool(options.get(CONF_WA_APP_SECRET)),
+        "missing_config": client.missing_config() if client else ["client_not_setup"],
+        "recipients": [_mask(s) for s in senders],
+        "conversation_agent": agent or "<default agent>",
+        "agent_configured": bool(agent),
+        "alert_time": options.get(CONF_WA_ALERT_TIME) or DEFAULT_WA_ALERT_TIME,
+        "alert_days": days,
+        "expiring_now": expiring,
+        "template": options.get(CONF_WA_TEMPLATE_NAME) or DEFAULT_WA_TEMPLATE_NAME,
+        "template_language": (
+            options.get(CONF_WA_TEMPLATE_LANG) or DEFAULT_WA_TEMPLATE_LANG
+        ),
+        "template_parameter": options.get(
+            CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM
+        ),
+        "last_send_error": client.last_error if client else None,
+    }
 
 
 @callback

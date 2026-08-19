@@ -26,6 +26,7 @@ SERVICE_SET_THRESHOLD = "set_threshold"
 SERVICE_LOOKUP_BARCODE = "lookup_barcode"
 SERVICE_UPDATE_PRODUCT = "update_product"
 SERVICE_SEND_EXPIRY_ALERT = "send_expiry_alert"
+SERVICE_WA_DIAGNOSTICS = "whatsapp_diagnostics"
 
 # Event names
 EVENT_BARCODE_UNKNOWN = "home_inventory_barcode_unknown"
@@ -60,6 +61,7 @@ CONF_WA_ALERT_DAYS = "whatsapp_alert_days"
 CONF_WA_TEMPLATE_NAME = "whatsapp_template_name"
 CONF_WA_TEMPLATE_LANG = "whatsapp_template_language"
 CONF_WA_TEMPLATE_PARAM = "whatsapp_template_parameter"
+CONF_WA_DEBUG = "whatsapp_debug"
 
 DEFAULT_WA_TEMPLATE_NAME = "inventory_alert"
 DEFAULT_WA_TEMPLATE_LANG = "en"

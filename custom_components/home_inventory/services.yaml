@@ -387,6 +387,14 @@ send_expiry_alert:
       default: false
       selector: {boolean: {}}
 
+whatsapp_diagnostics:
+  name: WhatsApp Diagnostics
+  description: >
+    Report the resolved WhatsApp configuration: which settings are present,
+    the webhook URL to register with Meta, the conversation agent in use, and
+    the last send error. Secrets are reported as present/absent only, so the
+    output is safe to share.
+
 update_shopping_quantity:
   name: Update shopping item quantity
   description: >
