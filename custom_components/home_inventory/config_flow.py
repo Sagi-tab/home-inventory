@@ -37,6 +37,23 @@ from .const import (
 )
 
 
+def validate_options(user_input: dict) -> dict[str, str]:
+    """Reject option combinations that cannot work, keyed by field.
+
+    Kept free of `self` and `hass` so the rules can be tested directly.
+
+    Receipt scanning has no usable fallback without an AI Task entity: Home
+    Assistant does not pick a preferred one implicitly, so leaving it blank
+    fails only later, when a receipt is actually sent.
+    """
+    errors: dict[str, str] = {}
+    if user_input.get(CONF_RECEIPTS_ENABLED) and not str(
+        user_input.get(CONF_AI_TASK_ENTITY) or ""
+    ).strip():
+        errors[CONF_AI_TASK_ENTITY] = "ai_task_required"
+    return errors
+
+
 class HomeInventoryConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
@@ -55,16 +72,23 @@ class HomeInventoryOptionsFlow(OptionsFlow):
     """Configure the WhatsApp bridge."""
 
     async def async_step_init(self, user_input=None):
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # Blank secrets mean "keep the stored value" so the form can be
-            # re-saved without retyping the token.
-            current = dict(self.config_entry.options)
-            for key in (CONF_WA_ACCESS_TOKEN, CONF_WA_APP_SECRET, CONF_WA_VERIFY_TOKEN):
-                if not user_input.get(key) and current.get(key):
-                    user_input[key] = current[key]
-            return self.async_create_entry(title="", data=user_input)
+            errors = validate_options(user_input)
+            if not errors:
+                # Blank secrets mean "keep the stored value" so the form can be
+                # re-saved without retyping the token.
+                current = dict(self.config_entry.options)
+                for key in (
+                    CONF_WA_ACCESS_TOKEN, CONF_WA_APP_SECRET, CONF_WA_VERIFY_TOKEN,
+                ):
+                    if not user_input.get(key) and current.get(key):
+                        user_input[key] = current[key]
+                return self.async_create_entry(title="", data=user_input)
 
-        options = self.config_entry.options
+        # On a validation error redisplay what was typed rather than the stored
+        # values, so fixing one field does not silently revert the others.
+        options = user_input if user_input is not None else self.config_entry.options
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -154,5 +178,6 @@ class HomeInventoryOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=schema,
+            errors=errors,
             description_placeholders={"webhook": f"{base_url}{WHATSAPP_WEBHOOK_PATH}"},
         )
