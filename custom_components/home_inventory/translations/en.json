@@ -28,21 +28,57 @@
           "whatsapp_template_name": "Alert template name",
           "whatsapp_template_language": "Alert template language code",
           "whatsapp_template_parameter": "Alert template variable name, e.g. expired_items (leave blank if the template uses a numbered variable instead)",
-          "whatsapp_debug": "Verbose logging (logs each incoming message, the agent reply and the send result to the Home Assistant log)"
+          "whatsapp_debug": "Verbose logging (logs each incoming message, the agent reply and the send result to the Home Assistant log)",
+          "receipts_enabled": "Read receipt photos sent over WhatsApp",
+          "ai_task_entity": "AI Task entity used to read receipts (leave empty for the default)"
         }
       }
     }
   },
   "services": {
-    "send_expiry_alert": {"name": "Send expiry alert (WhatsApp)", "description": "Send the expiring-items digest now"},
-    "whatsapp_diagnostics": {"name": "WhatsApp diagnostics", "description": "Report the resolved WhatsApp configuration"},
-    "scan_barcode": {"name": "Scan barcode", "description": "Process a barcode scan"},
-    "lookup_barcode": {"name": "Lookup barcode", "description": "Look up a barcode"},
-    "add_item": {"name": "Add item", "description": "Add item to inventory or shopping list"},
-    "remove_item": {"name": "Remove item", "description": "Remove inventory"},
-    "add_to_shopping": {"name": "Add to shopping list", "description": "Add a line to the shopping list"},
-    "complete_shopping_item": {"name": "Complete shopping item", "description": "Mark as purchased"},
-    "set_threshold": {"name": "Set threshold", "description": "Set low-stock threshold"},
-    "update_product": {"name": "Teach product", "description": "Save a product for a scanned barcode"}
+    "send_expiry_alert": {
+      "name": "Send expiry alert (WhatsApp)",
+      "description": "Send the expiring-items digest now"
+    },
+    "whatsapp_diagnostics": {
+      "name": "WhatsApp diagnostics",
+      "description": "Report the resolved WhatsApp configuration"
+    },
+    "scan_barcode": {
+      "name": "Scan barcode",
+      "description": "Process a barcode scan"
+    },
+    "lookup_barcode": {
+      "name": "Lookup barcode",
+      "description": "Look up a barcode"
+    },
+    "add_item": {
+      "name": "Add item",
+      "description": "Add item to inventory or shopping list"
+    },
+    "remove_item": {
+      "name": "Remove item",
+      "description": "Remove inventory"
+    },
+    "add_to_shopping": {
+      "name": "Add to shopping list",
+      "description": "Add a line to the shopping list"
+    },
+    "complete_shopping_item": {
+      "name": "Complete shopping item",
+      "description": "Mark as purchased"
+    },
+    "set_threshold": {
+      "name": "Set threshold",
+      "description": "Set low-stock threshold"
+    },
+    "update_product": {
+      "name": "Teach product",
+      "description": "Save a product for a scanned barcode"
+    },
+    "process_receipt": {
+      "name": "Process receipt",
+      "description": "Extract items from a receipt image file and add them"
+    }
   }
 }

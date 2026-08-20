@@ -25,6 +25,8 @@ from .const import (
     CONF_WA_VERIFY_TOKEN,
     DEFAULT_EXPIRING_DAYS,
     DEFAULT_WA_ALERT_TIME,
+    CONF_AI_TASK_ENTITY,
+    CONF_RECEIPTS_ENABLED,
     CONF_WA_DEBUG,
     CONF_WA_TEMPLATE_PARAM,
     DEFAULT_WA_TEMPLATE_LANG,
@@ -132,6 +134,16 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                     CONF_WA_DEBUG,
                     default=options.get(CONF_WA_DEBUG, False),
                 ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_RECEIPTS_ENABLED,
+                    default=options.get(CONF_RECEIPTS_ENABLED, True),
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_AI_TASK_ENTITY,
+                    default=options.get(CONF_AI_TASK_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="ai_task")
+                ),
             }
         )
         # Show the exact callback URL to paste into the Meta app config.

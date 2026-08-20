@@ -41,6 +41,7 @@ from .const import (
     CONF_WA_ALERT_TIME,
     CONF_WA_ALLOWED_SENDERS,
     CONF_WA_APP_SECRET,
+    CONF_RECEIPTS_ENABLED,
     CONF_WA_ENABLED,
     CONF_WA_PHONE_NUMBER_ID,
     CONF_WA_TEMPLATE_LANG,
@@ -383,17 +384,27 @@ class WhatsAppWebhookView(HomeAssistantView):
             _record(self.hass, "rejected_sender_not_allowed", _mask(sender))
             return
 
-        if message.get("type") != "text":
-            _trace(options, "non-text message (%s), replying with a hint",
-                   message.get("type"))
+        msg_type = message.get("type")
+        if msg_type in ("image", "document"):
+            await self._async_handle_receipt(sender, message, msg_type)
+            return
+
+        if msg_type != "text":
+            _trace(options, "non-text message (%s), replying with a hint", msg_type)
             await self._async_reply(
-                sender, "I can only read text messages right now."
+                sender, "Send me text, or a photo of a receipt."
             )
             return
 
         text = (message.get("text") or {}).get("body", "").strip()
         if not text:
             _trace(options, "empty text body, nothing to do")
+            return
+
+        # A pending receipt gets first refusal on the reply: "yes" means confirm
+        # the receipt, not something for the agent to interpret. Anything it
+        # does not consume falls through to normal conversation.
+        if await self._async_receipt_reply(sender, text):
             return
 
         _trace(options, "asking agent %r: %r",
@@ -407,6 +418,135 @@ class WhatsAppWebhookView(HomeAssistantView):
                 "Conversation agent returned no reply for %s; nothing sent",
                 _mask(sender),
             )
+
+    async def _async_handle_receipt(self, sender: str, message: dict, kind: str) -> None:
+        """Download a photo/PDF, extract the items, and offer them for confirm."""
+        from . import receipts
+
+        options = self._options
+        if not options.get(CONF_RECEIPTS_ENABLED, True):
+            await self._async_reply(sender, "Receipt scanning is turned off.")
+            return
+
+        payload = message.get(kind) or {}
+        media_id = payload.get("id")
+        if not media_id:
+            await self._async_reply(sender, "I couldn't find an image in that.")
+            return
+
+        _record(self.hass, "receipt_received", kind)
+        _trace(options, "receipt %s from %s, media=%s", kind, _mask(sender), media_id)
+        await self._async_reply(sender, "Got it - reading the receipt...")
+
+        path = None
+        try:
+            data, mime = await receipts.async_download_media(
+                self.hass, options, media_id
+            )
+            path, content_id = await receipts.async_stage_media(self.hass, data, mime)
+            items = await receipts.async_extract_items(self.hass, content_id)
+            if not items:
+                _record(self.hass, "receipt_empty")
+                await self._async_reply(
+                    sender, "I couldn't find any products on that receipt."
+                )
+                return
+
+            lines = await receipts.async_resolve_lines(self.hass, items)
+            receipts.session_start(self.hass, sender, lines)
+            _record(self.hass, "receipt_extracted", f"{len(lines)} lines")
+            await self._async_reply(sender, receipts.format_preview(lines))
+        except receipts.ReceiptError as err:
+            _record(self.hass, "receipt_failed", str(err)[:80])
+            _LOGGER.error("Receipt processing failed: %s", err)
+            await self._async_reply(sender, str(err))
+        except Exception as err:  # noqa: BLE001
+            _record(self.hass, "receipt_failed", type(err).__name__)
+            _LOGGER.exception("Receipt processing crashed")
+            await self._async_reply(sender, f"Something went wrong: {err}")
+        finally:
+            if path is not None:
+                await receipts.async_cleanup(self.hass, path)
+
+    async def _async_receipt_reply(self, sender: str, text: str) -> bool:
+        """Handle a reply belonging to a pending receipt.
+
+        Returns True when the message was consumed, so the caller knows not to
+        pass it on to the conversation agent.
+        """
+        from . import receipts
+
+        session = receipts.session_get(self.hass, sender)
+        if not session:
+            return False
+
+        answer = text.strip().lower()
+
+        if session["state"] == "awaiting_confirm":
+            if answer in receipts.CANCEL_WORDS:
+                receipts.session_clear(self.hass, sender)
+                await self._async_reply(sender, "Discarded - nothing was added.")
+                return True
+            if answer not in receipts.CONFIRM_WORDS:
+                # Not an answer to us; let the agent field it and keep waiting.
+                return False
+
+            lines = session["lines"]
+            perishables = [
+                (i, line) for i, line in enumerate(lines) if receipts.is_perishable(line)
+            ]
+            if perishables:
+                session["state"] = "awaiting_dates"
+                session["pending_dates"] = perishables
+                await self._async_reply(
+                    sender, receipts.format_date_prompt(perishables)
+                )
+                return True
+            await self._async_finish_receipt(sender, session)
+            return True
+
+        if session["state"] == "awaiting_dates":
+            perishables = session["pending_dates"]
+            if answer not in receipts.SKIP_WORDS:
+                try:
+                    dates = await receipts.async_parse_dates(
+                        self.hass, text, perishables
+                    )
+                except receipts.ReceiptError as err:
+                    await self._async_reply(
+                        sender, f"{err} Adding without dates."
+                    )
+                    dates = {}
+                for number, iso in dates.items():
+                    line_index = perishables[number - 1][0]
+                    session["lines"][line_index]["expiration_date"] = iso
+            await self._async_finish_receipt(sender, session)
+            return True
+
+        return False
+
+    async def _async_finish_receipt(self, sender: str, session: dict) -> None:
+        from . import receipts
+
+        try:
+            result = await receipts.async_commit(self.hass, session["lines"])
+        except receipts.ReceiptError as err:
+            _record(self.hass, "receipt_failed", str(err)[:80])
+            await self._async_reply(sender, str(err))
+            return
+        finally:
+            receipts.session_clear(self.hass, sender)
+
+        _record(self.hass, "receipt_committed", f"{result['count']} items")
+        summary = [f"Added {result['count']} item(s) to the inventory."]
+        if result["products_created"]:
+            summary.append(f"{result['products_created']} new product(s) created.")
+        if result["fulfilled_shopping_ids"]:
+            summary.append(
+                f"{len(result['fulfilled_shopping_ids'])} shopping list "
+                "item(s) marked as bought."
+            )
+        await self._async_reply(sender, " ".join(summary))
 
     def _sender_allowed(self, sender: str | None) -> bool:
         if not sender:

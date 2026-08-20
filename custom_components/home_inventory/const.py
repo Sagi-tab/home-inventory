@@ -27,6 +27,7 @@ SERVICE_LOOKUP_BARCODE = "lookup_barcode"
 SERVICE_UPDATE_PRODUCT = "update_product"
 SERVICE_SEND_EXPIRY_ALERT = "send_expiry_alert"
 SERVICE_WA_DIAGNOSTICS = "whatsapp_diagnostics"
+SERVICE_PROCESS_RECEIPT = "process_receipt"
 
 # Event names
 EVENT_BARCODE_UNKNOWN = "home_inventory_barcode_unknown"
@@ -62,6 +63,8 @@ CONF_WA_TEMPLATE_NAME = "whatsapp_template_name"
 CONF_WA_TEMPLATE_LANG = "whatsapp_template_language"
 CONF_WA_TEMPLATE_PARAM = "whatsapp_template_parameter"
 CONF_WA_DEBUG = "whatsapp_debug"
+CONF_RECEIPTS_ENABLED = "receipts_enabled"
+CONF_AI_TASK_ENTITY = "ai_task_entity"
 
 DEFAULT_WA_TEMPLATE_NAME = "inventory_alert"
 DEFAULT_WA_TEMPLATE_LANG = "en"
@@ -104,3 +107,19 @@ LOCATIONS = [
     "cleaning_cabinet",
     "other",
 ]
+
+# ---------- Receipt scanning ----------
+# Media IDs from webhooks are downloaded in two steps: the id resolves to a
+# short-lived URL which still requires the bearer token.
+WHATSAPP_MEDIA_URL = "https://graph.facebook.com/v21.0/{media_id}"
+# Refuse anything larger; a phone photo of a receipt is well under this.
+RECEIPT_MAX_BYTES = 12 * 1024 * 1024
+RECEIPT_ACCEPTED_MIME = ("image/jpeg", "image/png", "image/webp", "application/pdf")
+# How long a pending receipt stays open for confirmation.
+RECEIPT_SESSION_TTL = 900  # seconds
+# Categories whose expiry actually matters enough to ask about.
+PERISHABLE_CATEGORIES = ["dairy", "produce", "meat_fish", "bakery"]
+# find_similar_products score at or above which a receipt line is linked to an
+# existing product without asking. Matches the MatchView "strong" convention.
+RECEIPT_STRONG_MATCH_SCORE = 8.0
+RECEIPT_MIN_MATCH_SCORE = 4.0
