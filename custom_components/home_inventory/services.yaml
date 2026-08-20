@@ -387,6 +387,25 @@ send_expiry_alert:
       default: false
       selector: {boolean: {}}
 
+process_receipt:
+  name: Process Receipt
+  description: >
+    Read a receipt image or PDF from a local file, extract the purchased
+    items and add them to the inventory. Useful for testing the receipt
+    pipeline without sending anything over WhatsApp.
+  fields:
+    file_path:
+      name: File path
+      description: Absolute path to the receipt image or PDF.
+      required: true
+      example: /media/receipt.jpg
+      selector: {text: {}}
+    preview_only:
+      name: Preview only
+      description: Extract and match without writing anything to the inventory.
+      default: false
+      selector: {boolean: {}}
+
 whatsapp_diagnostics:
   name: WhatsApp Diagnostics
   description: >

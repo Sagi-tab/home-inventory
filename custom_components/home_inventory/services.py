@@ -25,6 +25,7 @@ from .const import (
     SERVICE_SEND_EXPIRY_ALERT,
     SERVICE_SET_THRESHOLD,
     SERVICE_UPDATE_PRODUCT,
+    SERVICE_PROCESS_RECEIPT,
     SERVICE_WA_DIAGNOSTICS,
 )
 from .lookup import BarcodeLookup
@@ -223,13 +224,11 @@ def async_register_services(
                 expiration_date=call.data.get("expiration_date"),
                 barcode=barcode,
             )
-            # Auto-fulfill: if this product is on the shopping list, check it off.
-            fulfilled_ids: list[int] = []
-            open_shop = await db.list_shopping(include_completed=False)
-            for s in open_shop:
-                if s.get("product_id") == product_id:
-                    await db.complete_shopping(int(s["id"]))
-                    fulfilled_ids.append(int(s["id"]))
+            # Auto-fulfill: if this product is on the shopping list, check it
+            # off. Shared with the receipt path so both behave identically.
+            from .receipts import async_complete_shopping_for
+
+            fulfilled_ids = await async_complete_shopping_for(hass, db, product_id)
             _fire_changed(hass)
             return {
                 "product": result,
@@ -630,6 +629,56 @@ def async_register_services(
     hass.services.async_register(
         DOMAIN, SERVICE_WA_DIAGNOSTICS, handle_whatsapp_diagnostics,
         schema=vol.Schema({}), supports_response="only",
+    )
+
+    async def handle_process_receipt(call: ServiceCall) -> dict:
+        """Run the receipt pipeline over a local file, for testing.
+
+        Unlike the WhatsApp path this commits straight away - there is nobody
+        to confirm with - unless preview_only is set.
+        """
+        from .receipts import (
+            ReceiptError,
+            async_cleanup,
+            async_commit,
+            async_extract_items,
+            async_resolve_lines,
+            async_stage_media,
+        )
+
+        path = call.data["file_path"]
+
+        def _read() -> bytes:
+            return open(path, "rb").read()
+
+        try:
+            data = await hass.async_add_executor_job(_read)
+        except OSError as err:
+            raise HomeAssistantError(f"Cannot read {path}: {err}") from err
+
+        mime = "application/pdf" if str(path).lower().endswith(".pdf") else "image/jpeg"
+        staged = None
+        try:
+            staged, content_id = await async_stage_media(hass, data, mime)
+            items = await async_extract_items(hass, content_id)
+            lines = await async_resolve_lines(hass, items)
+            if call.data.get("preview_only"):
+                return {"items": len(lines), "lines": lines, "committed": False}
+            result = await async_commit(hass, lines)
+            return {"items": len(lines), "committed": True, **result}
+        except ReceiptError as err:
+            raise HomeAssistantError(str(err)) from err
+        finally:
+            if staged is not None:
+                await async_cleanup(hass, staged)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_PROCESS_RECEIPT, handle_process_receipt,
+        schema=vol.Schema({
+            vol.Required("file_path"): cv.string,
+            vol.Optional("preview_only"): cv.boolean,
+        }),
+        supports_response="only",
     )
 
     _LOGGER.debug("Registered Home Inventory services")
