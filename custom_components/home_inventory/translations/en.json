@@ -30,9 +30,12 @@
           "whatsapp_template_parameter": "Alert template variable name, e.g. expired_items (leave blank if the template uses a numbered variable instead)",
           "whatsapp_debug": "Verbose logging (logs each incoming message, the agent reply and the send result to the Home Assistant log)",
           "receipts_enabled": "Read receipt photos sent over WhatsApp",
-          "ai_task_entity": "AI Task entity used to read receipts (leave empty for the default)"
+          "ai_task_entity": "AI Task entity used to read receipts (required when receipt scanning is on)"
         }
       }
+    },
+    "error": {
+      "ai_task_required": "Receipt scanning needs an AI Task entity — pick one above, or turn receipt scanning off. If the list is empty, add an AI Task entry to your AI integration (Settings → Devices & Services → Google Generative AI → Add entry) and reopen this form."
     }
   },
   "services": {
