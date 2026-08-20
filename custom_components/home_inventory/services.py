@@ -660,7 +660,7 @@ def async_register_services(
         staged = None
         try:
             staged, content_id = await async_stage_media(hass, data, mime)
-            items = await async_extract_items(hass, content_id)
+            items = await async_extract_items(hass, content_id, mime)
             lines = await async_resolve_lines(hass, items)
             if call.data.get("preview_only"):
                 return {"items": len(lines), "lines": lines, "committed": False}
