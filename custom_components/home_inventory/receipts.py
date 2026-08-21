@@ -47,34 +47,52 @@ _LOGGER = logging.getLogger(__name__)
 CONFIRM_WORDS = {"yes", "y", "ok", "okay", "confirm", "כן", "אישור", "אשר"}
 CANCEL_WORDS = {"no", "n", "cancel", "stop", "לא", "ביטול", "בטל"}
 SKIP_WORDS = {"skip", "none", "-", "דלג"}
+# Leading words that may introduce a list of line numbers to drop. "no" on its
+# own is still a cancel - that is checked before this runs.
+DROP_WORDS = {
+    "no", "not", "drop", "remove", "delete", "without", "except", "and",
+    "לא", "הסר", "הסירי", "בלי", "מחק", "חוץ", "ו",
+}
 
-EXTRACT_INSTRUCTIONS = """Extract the purchased products from this shopping receipt.
+# Two passes in one call. Naming a product in the same breath as reading it
+# invites the model to answer with a plausible supermarket item instead of the
+# faint one actually printed; transcribing first separates reading from
+# interpreting. The preamble costs nothing to parse - parse_json_reply already
+# takes the bracketed span out of surrounding prose.
+EXTRACT_INSTRUCTIONS = """Read the purchased products off this shopping receipt.
 
-Work down the receipt line by line and return EVERY product line you can \
-read. A supermarket receipt usually has ten or more. Do not stop after the \
-first few, do not summarise, and do not merge similar lines - two lines of \
-the same product are two entries. The receipt is often printed in Hebrew, \
-right to left, on faint thermal paper; transcribe what you can and include a \
-line even when you are only somewhat sure of its wording.
+Work in two steps.
 
-Rules:
-- One entry per product actually bought.
-- Ignore any line that is not a product: totals, subtotals, VAT, change, \
+STEP 1 - transcribe. Work down the receipt line by line and write out every \
+item line exactly as printed, character for character, including its quantity \
+and price. Israeli receipts are printed in Hebrew, right to left, on faint \
+thermal paper, and product names are heavily abbreviated. Transcribe the \
+abbreviation - do not expand it, do not translate it, and do not replace an \
+unclear word with a product that would make more sense. If a character is \
+unreadable, write what you can see. A supermarket receipt usually has ten or \
+more item lines; do not stop early and do not summarise.
+
+STEP 2 - convert your transcription to JSON.
+
+Rules for step 2:
+- One entry per product line you transcribed. Two lines of the same product \
+are two entries, never merged.
+- Drop the lines that are not products: totals, subtotals, VAT, change, \
 discounts, loyalty points, bottle deposits, payment method, store address, \
 phone numbers, dates and receipt numbers.
-- `name` is REQUIRED on every entry and must never be empty. Keep the product \
-name exactly as printed. If it is Hebrew, put that same Hebrew text in both \
-`name` and `name_he` - do not translate it and do not leave `name` blank.
+- `name` is REQUIRED and must never be empty. It is the text you transcribed, \
+unchanged. For a Hebrew line put that same Hebrew text in both `name` and \
+`name_he`. Never translate it into English.
 - `barcode` only when a barcode or long numeric product code is actually \
 printed on that line. Never invent one, and never use the line number, price \
 or receipt number as a barcode.
 - `quantity` is how many units were bought (default 1). If the line is priced \
 by weight, put the weight in `quantity` and the unit (kg/g) in `unit`.
 - `category` is a short free-text guess such as dairy, produce, meat, frozen, \
-bakery, cleaning, snacks.
+bakery, cleaning, snacks. This is the only field you may infer.
 - `perishable` is true for fresh food that spoils within weeks.
 
-Return ONLY raw JSON, no prose and no code fences, shaped exactly like:
+End your answer with the JSON, shaped exactly like:
 {"items": [{"name": "...", "name_he": "...", "barcode": "...", \
 "quantity": 1, "unit": "pcs", "category": "...", "perishable": true}]}
 
@@ -220,22 +238,32 @@ def parse_json_reply(text: str) -> Any:
     except ValueError:
         pass
 
-    # Try whichever bracket opens first: a JSON array wrapped in prose also
-    # contains objects, so always preferring "{" would return an inner item
-    # instead of the list.
-    spans = []
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = body.find(opener)
-        end = body.rfind(closer)
-        if start != -1 and end > start:
-            spans.append((start, body[start:end + 1]))
+    return _scan_json(body)
 
-    for _, span in sorted(spans):
+
+def _scan_json(body: str) -> Any:
+    """Find the largest decodable JSON value embedded in text.
+
+    The extraction prompt deliberately asks the model to transcribe the
+    receipt before emitting JSON, so the payload arrives after a paragraph of
+    Hebrew that may itself contain brackets. Taking the outermost bracketed
+    span breaks on that; decoding from every candidate position and keeping
+    the longest success does not, because the real payload dwarfs any stray
+    bracket in the prose.
+    """
+    decoder = json.JSONDecoder()
+    best: Any = None
+    best_len = 0
+    for index, char in enumerate(body):
+        if char not in "{[":
+            continue
         try:
-            return json.loads(span)
+            value, end = decoder.raw_decode(body, index)
         except ValueError:
             continue
-    return None
+        if end - index > best_len:
+            best, best_len = value, end - index
+    return best
 
 
 async def _async_generate(
@@ -332,12 +360,11 @@ async def async_extract_items(
         attachment=media_content_id,
         mime=mime,
     )
-    # Accept either the documented {"items": [...]} or a bare list, since
-    # models drift between the two however firmly they are instructed.
-    items = data.get("items") if isinstance(data, dict) else data
-    if not isinstance(items, list):
+    items = _find_items(data)
+    if items is None:
         _LOGGER.warning(
-            "Receipt extraction: expected a list of items, got %s", type(data).__name__
+            "Receipt extraction: no list of items anywhere in the reply (%s)",
+            _shape(data),
         )
         return []
 
@@ -352,6 +379,48 @@ async def async_extract_items(
         "Receipt extraction: %s line(s) returned, %s usable", len(items), len(cleaned)
     )
     return cleaned
+
+
+ITEM_KEYS = ("items", "products", "lines", "receipt_items", "purchases", "entries")
+
+
+def _find_items(data: Any, depth: int = 0) -> list | None:
+    """Locate the list of receipt lines in whatever the model returned.
+
+    Same failure mode as the name aliases: the shape is asked for explicitly
+    and supplied approximately, so `{"receipt": {"products": [...]}}` used to
+    read as an empty receipt. Searches the named keys first, then any list of
+    dicts, shallowest first - a nested `{"items": [...]}` should win over an
+    incidental list of strings sitting next to it.
+
+    Returns None only when there is no list at all, which is distinct from a
+    genuinely empty receipt and is logged differently.
+    """
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict) or depth > 3:
+        return None
+
+    for key in ITEM_KEYS:
+        if isinstance(data.get(key), list):
+            return data[key]
+    # A list of objects is a receipt whatever it is called; a list of scalars
+    # is far more likely to be tags or totals, so it does not count.
+    for value in data.values():
+        if isinstance(value, list) and any(isinstance(v, dict) for v in value):
+            return value
+    for value in data.values():
+        found = _find_items(value, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _shape(data: Any) -> str:
+    """Describe a reply for the log without dumping the whole receipt."""
+    if isinstance(data, dict):
+        return f"dict with keys {sorted(data)[:10]}"
+    return type(data).__name__
 
 
 def _with_name(item: dict) -> dict | None:
@@ -503,8 +572,47 @@ def format_preview(lines: list[dict]) -> str:
             bits.append("(new)")
         out.append(" ".join(bits))
     out.append("")
-    out.append("Reply YES to add these, or NO to discard.")
+    out.append(
+        "Reply YES to add these, NO to discard, or the numbers of any lines "
+        "I got wrong (e.g. \"no 3\" or \"2,5\") to drop them."
+    )
     return "\n".join(out)
+
+
+def parse_drop_request(text: str, count: int) -> list[int] | None:
+    """Read "no 3", "3,7", "drop 2 and 5", "2-4" as lines to remove.
+
+    Extraction is good enough to be worth keeping and not good enough to trust
+    line by line, so rejecting the whole receipt over one misread product is
+    the wrong trade. Returns zero-based indexes, an empty list when numbers
+    were given but none of them exist, or None when this is not a drop request
+    at all - in which case the message belongs to someone else.
+    """
+    body = str(text or "").strip().lower()
+    if not body:
+        return None
+
+    wanted: list[int] = []
+    for token in (t for t in re.split(r"[\s,;.]+", body) if t):
+        if token in DROP_WORDS:
+            continue
+        match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", token)
+        if not match:
+            # A word we do not recognise: treat the whole message as prose
+            # rather than acting on whichever numbers it happens to contain.
+            return None
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            start, end = end, start
+        # Bound the span so "1-999999" cannot build a huge list, but keep
+        # numbers past the end: they are a drop request naming a line that
+        # does not exist, which the caller answers differently from prose.
+        wanted.extend(range(start, min(end, start + count) + 1))
+
+    if not wanted:
+        return None
+    return sorted({n - 1 for n in wanted if 1 <= n <= count})
 
 
 def format_date_prompt(perishables: list[tuple[int, dict]]) -> str:
