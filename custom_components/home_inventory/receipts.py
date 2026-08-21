@@ -332,12 +332,11 @@ async def async_extract_items(
         attachment=media_content_id,
         mime=mime,
     )
-    # Accept either the documented {"items": [...]} or a bare list, since
-    # models drift between the two however firmly they are instructed.
-    items = data.get("items") if isinstance(data, dict) else data
-    if not isinstance(items, list):
+    items = _find_items(data)
+    if items is None:
         _LOGGER.warning(
-            "Receipt extraction: expected a list of items, got %s", type(data).__name__
+            "Receipt extraction: no list of items anywhere in the reply (%s)",
+            _shape(data),
         )
         return []
 
@@ -352,6 +351,48 @@ async def async_extract_items(
         "Receipt extraction: %s line(s) returned, %s usable", len(items), len(cleaned)
     )
     return cleaned
+
+
+ITEM_KEYS = ("items", "products", "lines", "receipt_items", "purchases", "entries")
+
+
+def _find_items(data: Any, depth: int = 0) -> list | None:
+    """Locate the list of receipt lines in whatever the model returned.
+
+    Same failure mode as the name aliases: the shape is asked for explicitly
+    and supplied approximately, so `{"receipt": {"products": [...]}}` used to
+    read as an empty receipt. Searches the named keys first, then any list of
+    dicts, shallowest first - a nested `{"items": [...]}` should win over an
+    incidental list of strings sitting next to it.
+
+    Returns None only when there is no list at all, which is distinct from a
+    genuinely empty receipt and is logged differently.
+    """
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict) or depth > 3:
+        return None
+
+    for key in ITEM_KEYS:
+        if isinstance(data.get(key), list):
+            return data[key]
+    # A list of objects is a receipt whatever it is called; a list of scalars
+    # is far more likely to be tags or totals, so it does not count.
+    for value in data.values():
+        if isinstance(value, list) and any(isinstance(v, dict) for v in value):
+            return value
+    for value in data.values():
+        found = _find_items(value, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _shape(data: Any) -> str:
+    """Describe a reply for the log without dumping the whole receipt."""
+    if isinstance(data, dict):
+        return f"dict with keys {sorted(data)[:10]}"
+    return type(data).__name__
 
 
 def _with_name(item: dict) -> dict | None:

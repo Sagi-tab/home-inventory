@@ -450,7 +450,11 @@ class WhatsAppWebhookView(HomeAssistantView):
             if not items:
                 _record(self.hass, "receipt_empty")
                 await self._async_reply(
-                    sender, "I couldn't find any products on that receipt."
+                    sender,
+                    "I couldn't find any products on that receipt. Try a "
+                    "photo taken straight on, in good light, close enough "
+                    "that the item lines are readable - and one photo per "
+                    "part if the receipt is long.",
                 )
                 return
 
