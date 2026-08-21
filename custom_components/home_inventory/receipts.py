@@ -50,13 +50,21 @@ SKIP_WORDS = {"skip", "none", "-", "דלג"}
 
 EXTRACT_INSTRUCTIONS = """Extract the purchased products from this shopping receipt.
 
+Work down the receipt line by line and return EVERY product line you can \
+read. A supermarket receipt usually has ten or more. Do not stop after the \
+first few, do not summarise, and do not merge similar lines - two lines of \
+the same product are two entries. The receipt is often printed in Hebrew, \
+right to left, on faint thermal paper; transcribe what you can and include a \
+line even when you are only somewhat sure of its wording.
+
 Rules:
 - One entry per product actually bought.
 - Ignore any line that is not a product: totals, subtotals, VAT, change, \
 discounts, loyalty points, bottle deposits, payment method, store address, \
 phone numbers, dates and receipt numbers.
-- Keep the product name exactly as printed. If it is Hebrew, put it in both \
-`name` and `name_he`.
+- `name` is REQUIRED on every entry and must never be empty. Keep the product \
+name exactly as printed. If it is Hebrew, put that same Hebrew text in both \
+`name` and `name_he` - do not translate it and do not leave `name` blank.
 - `barcode` only when a barcode or long numeric product code is actually \
 printed on that line. Never invent one, and never use the line number, price \
 or receipt number as a barcode.
@@ -72,6 +80,15 @@ Return ONLY raw JSON, no prose and no code fences, shaped exactly like:
 
 Omit `barcode` and `name_he` when they do not apply. Return {"items": []} if \
 this is not a receipt."""
+
+# Models rename this field constantly - product_name, title, description, and
+# for a Hebrew receipt very often only name_he. Dropping those entries is
+# indistinguishable from the model having missed the line, so accept any of
+# them rather than silently returning a shorter receipt.
+NAME_KEYS = (
+    "name", "name_he", "hebrew_name", "product_name", "product", "title",
+    "description", "item", "item_name",
+)
 
 
 
@@ -256,15 +273,52 @@ async def _async_generate(
             blocking=True, return_response=True,
         )
     except Exception as err:  # noqa: BLE001 - surfaced to the user verbatim
-        raise ReceiptError(f"The AI task failed: {err}") from err
+        raise ReceiptError(_failure_message(err, mime if attachment else None)) from err
 
     if not isinstance(result, dict):
         raise ReceiptError("The AI task returned nothing usable.")
 
-    parsed = parse_json_reply(result.get("data"))
+    raw = result.get("data")
+    _log_reply(hass, task_name, raw)
+    parsed = parse_json_reply(raw)
     if parsed is None:
         raise ReceiptError("The AI returned something I could not read as JSON.")
     return parsed
+
+
+def _log_reply(hass: HomeAssistant, task_name: str, raw: Any) -> None:
+    """Record what the model actually said.
+
+    Without this, a receipt that comes back with one wrong line is impossible
+    to attribute: the model may have misread the photo, or answered in a shape
+    we then discarded. Follows the WhatsApp debug toggle so turning on verbose
+    logging is enough to see it, with no configuration.yaml edit.
+    """
+    from .const import CONF_WA_DEBUG
+
+    text = raw if isinstance(raw, str) else repr(raw)
+    if hass.data.get(DOMAIN, {}).get("wa_options", {}).get(CONF_WA_DEBUG):
+        _LOGGER.info("[receipt] %s replied: %s", task_name, text[:4000])
+    else:
+        _LOGGER.debug("[receipt] %s replied: %s", task_name, text[:4000])
+
+
+def _failure_message(err: Exception, mime: str | None) -> str:
+    """Turn a provider error into something the sender can act on.
+
+    PDFs are singled out because they fail where photos succeed: the file is
+    uploaded to the model provider asynchronously and a request that arrives
+    before it finishes processing is rejected as an invalid argument. That is
+    the provider's race, not something this integration can retry around, and
+    a photo goes down a path that works today.
+    """
+    detail = str(err)
+    if mime == "application/pdf" and "INVALID_ARGUMENT" in detail:
+        return (
+            "I couldn't read that PDF - the AI model rejected it. Send a photo "
+            "or screenshot of the receipt instead, which works reliably."
+        )
+    return f"The AI task failed: {detail}"
 
 
 async def async_extract_items(
@@ -282,8 +336,36 @@ async def async_extract_items(
     # models drift between the two however firmly they are instructed.
     items = data.get("items") if isinstance(data, dict) else data
     if not isinstance(items, list):
+        _LOGGER.warning(
+            "Receipt extraction: expected a list of items, got %s", type(data).__name__
+        )
         return []
-    return [i for i in items if isinstance(i, dict) and str(i.get("name") or "").strip()]
+
+    cleaned: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        named = _with_name(item)
+        if named is not None:
+            cleaned.append(named)
+    _LOGGER.debug(
+        "Receipt extraction: %s line(s) returned, %s usable", len(items), len(cleaned)
+    )
+    return cleaned
+
+
+def _with_name(item: dict) -> dict | None:
+    """Ensure `name` is populated, or drop the entry.
+
+    Returns a copy so the model's own dict is never mutated under the caller.
+    """
+    for key in NAME_KEYS:
+        value = str(item.get(key) or "").strip()
+        if value:
+            filled = dict(item)
+            filled["name"] = value
+            return filled
+    return None
 
 
 # ---------- resolution ----------
