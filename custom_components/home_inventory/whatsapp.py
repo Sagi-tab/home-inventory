@@ -444,7 +444,9 @@ class WhatsAppWebhookView(HomeAssistantView):
                 self.hass, options, media_id
             )
             path, content_id = await receipts.async_stage_media(self.hass, data, mime)
-            items = await receipts.async_extract_items(self.hass, content_id)
+            items = await receipts.async_extract_items(
+                self.hass, content_id, mime
+            )
             if not items:
                 _record(self.hass, "receipt_empty")
                 await self._async_reply(

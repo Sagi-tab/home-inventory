@@ -15,7 +15,9 @@ for the model's free-text category.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -46,29 +48,6 @@ CONFIRM_WORDS = {"yes", "y", "ok", "okay", "confirm", "כן", "אישור", "א�
 CANCEL_WORDS = {"no", "n", "cancel", "stop", "לא", "ביטול", "בטל"}
 SKIP_WORDS = {"skip", "none", "-", "דלג"}
 
-# What the model must return. Kept flat: nested structures are handled
-# inconsistently across AI Task providers.
-EXTRACT_STRUCTURE = {
-    "items": {
-        "description": "One entry per purchased product line",
-        "required": True,
-        "selector": {
-            "object": {
-                "multiple": True,
-                "fields": {
-                    "name": {"selector": {"text": {}}, "required": True},
-                    "name_he": {"selector": {"text": {}}},
-                    "barcode": {"selector": {"text": {}}},
-                    "quantity": {"selector": {"number": {"mode": "box"}}},
-                    "unit": {"selector": {"text": {}}},
-                    "category": {"selector": {"text": {}}},
-                    "perishable": {"selector": {"boolean": {}}},
-                },
-            }
-        },
-    }
-}
-
 EXTRACT_INSTRUCTIONS = """Extract the purchased products from this shopping receipt.
 
 Rules:
@@ -87,23 +66,13 @@ by weight, put the weight in `quantity` and the unit (kg/g) in `unit`.
 bakery, cleaning, snacks.
 - `perishable` is true for fresh food that spoils within weeks.
 
-Return an empty list if this is not a receipt."""
+Return ONLY raw JSON, no prose and no code fences, shaped exactly like:
+{"items": [{"name": "...", "name_he": "...", "barcode": "...", \
+"quantity": 1, "unit": "pcs", "category": "...", "perishable": true}]}
 
-DATE_STRUCTURE = {
-    "dates": {
-        "description": "Expiry date per numbered item the user answered for",
-        "required": True,
-        "selector": {
-            "object": {
-                "multiple": True,
-                "fields": {
-                    "index": {"selector": {"number": {"mode": "box"}}, "required": True},
-                    "date": {"selector": {"text": {}}},
-                },
-            }
-        },
-    }
-}
+Omit `barcode` and `name_he` when they do not apply. Return {"items": []} if \
+this is not a receipt."""
+
 
 
 class ReceiptError(HomeAssistantError):
@@ -212,28 +181,74 @@ async def async_cleanup(hass: HomeAssistant, path: Path) -> None:
 # ---------- extraction ----------
 
 
+def parse_json_reply(text: str) -> Any:
+    """Pull a JSON value out of a model reply.
+
+    Models wrap JSON in code fences or a sentence of preamble even when told
+    not to, so try the whole string first and then fall back to the outermost
+    bracketed span.
+    """
+    if isinstance(text, (dict, list)):
+        return text
+    body = str(text or "").strip()
+    if not body:
+        return None
+
+    fenced = re.search(r"```(?:json)?\s*(.+?)```", body, re.S)
+    if fenced:
+        body = fenced.group(1).strip()
+
+    try:
+        return json.loads(body)
+    except ValueError:
+        pass
+
+    # Try whichever bracket opens first: a JSON array wrapped in prose also
+    # contains objects, so always preferring "{" would return an inner item
+    # instead of the list.
+    spans = []
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = body.find(opener)
+        end = body.rfind(closer)
+        if start != -1 and end > start:
+            spans.append((start, body[start:end + 1]))
+
+    for _, span in sorted(spans):
+        try:
+            return json.loads(span)
+        except ValueError:
+            continue
+    return None
+
+
 async def _async_generate(
     hass: HomeAssistant,
     *,
     task_name: str,
     instructions: str,
-    structure: dict,
     attachment: str | None = None,
-) -> dict:
-    """Call ai_task.generate_data and return its structured data."""
+    mime: str = "image/jpeg",
+) -> Any:
+    """Run an AI task and return the parsed JSON from its reply.
+
+    Deliberately does not use `structure`: the selector-to-schema conversion
+    is where providers reject the request (Gemini answers 400 INVALID_ARGUMENT
+    for nested object selectors), and asking for raw JSON works the same
+    everywhere.
+    """
     entity_id = hass.data.get(DOMAIN, {}).get("wa_options", {}).get(
         CONF_AI_TASK_ENTITY
     )
     payload: dict[str, Any] = {
         "task_name": task_name,
         "instructions": instructions,
-        "structure": structure,
     }
     if entity_id:
         payload["entity_id"] = entity_id
     if attachment:
-        payload["attachments"] = {"media_content_id": attachment,
-                                  "media_content_type": "image/jpeg"}
+        payload["attachments"] = [
+            {"media_content_id": attachment, "media_content_type": mime}
+        ]
 
     try:
         result = await hass.services.async_call(
@@ -245,21 +260,27 @@ async def _async_generate(
 
     if not isinstance(result, dict):
         raise ReceiptError("The AI task returned nothing usable.")
-    return result.get("data") or result
+
+    parsed = parse_json_reply(result.get("data"))
+    if parsed is None:
+        raise ReceiptError("The AI returned something I could not read as JSON.")
+    return parsed
 
 
 async def async_extract_items(
-    hass: HomeAssistant, media_content_id: str
+    hass: HomeAssistant, media_content_id: str, mime: str = "image/jpeg"
 ) -> list[dict]:
     """Ask the vision model for the purchased lines."""
     data = await _async_generate(
         hass,
         task_name="Home Inventory receipt",
         instructions=EXTRACT_INSTRUCTIONS,
-        structure=EXTRACT_STRUCTURE,
         attachment=media_content_id,
+        mime=mime,
     )
-    items = data.get("items") if isinstance(data, dict) else None
+    # Accept either the documented {"items": [...]} or a bare list, since
+    # models drift between the two however firmly they are instructed.
+    items = data.get("items") if isinstance(data, dict) else data
     if not isinstance(items, list):
         return []
     return [i for i in items if isinstance(i, dict) and str(i.get("name") or "").strip()]
@@ -434,13 +455,14 @@ async def async_parse_dates(
             f"Today is {today}. The user was asked for expiry dates for these "
             f"numbered items:\n{listing}\n\nTheir reply: {reply!r}\n\n"
             "Return one entry per item they gave a date for, with `index` as "
-            "the number above and `date` as an ISO YYYY-MM-DD date. Resolve "
-            "relative dates like 'Friday' or 'in 3 days' against today. Omit "
-            "items they skipped or did not mention."
+            "the number above and `date` as an ISO YYYY-MM-DD date. "
+            "Resolve relative dates like 'Friday' or 'in 3 days' against "
+            "today. Omit items they skipped or did not mention.\n\n"
+            'Return ONLY raw JSON, no prose and no code fences, shaped like: '
+            '{"dates": [{"index": 1, "date": "2026-08-25"}]}'
         ),
-        structure=DATE_STRUCTURE,
     )
-    entries = data.get("dates") if isinstance(data, dict) else None
+    entries = data.get("dates") if isinstance(data, dict) else data
     result: dict[int, str] = {}
     for entry in entries or []:
         try:
