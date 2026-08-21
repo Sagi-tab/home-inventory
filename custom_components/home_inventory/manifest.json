@@ -1,7 +1,7 @@
 {
   "domain": "home_inventory",
   "name": "Home Inventory",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "documentation": "https://github.com/Sagi-tab/home-inventory",
   "issue_tracker": "https://github.com/Sagi-tab/home-inventory/issues",
   "dependencies": ["http", "frontend"],

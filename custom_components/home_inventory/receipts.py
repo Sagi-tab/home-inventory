@@ -63,10 +63,10 @@ EXTRACT_INSTRUCTIONS = """Read the purchased products off this shopping receipt.
 
 Work in two steps.
 
-STEP 1 - transcribe. Work down the receipt line by line and write out every \
-item line exactly as printed, character for character, including its quantity \
-and price. Israeli receipts are printed in Hebrew, right to left, on faint \
-thermal paper, and product names are heavily abbreviated. Transcribe the \
+STEP 1 - transcribe. List the product text of every item line, one per line, \
+exactly as printed. Nothing else: no prices, no numbering, no commentary. \
+Israeli receipts are printed in Hebrew, right to left, on faint thermal \
+paper, and product names are heavily abbreviated. Transcribe the \
 abbreviation - do not expand it, do not translate it, and do not replace an \
 unclear word with a product that would make more sense. If a character is \
 unreadable, write what you can see. A supermarket receipt usually has ten or \
