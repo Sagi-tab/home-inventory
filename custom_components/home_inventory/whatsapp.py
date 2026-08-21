@@ -493,6 +493,13 @@ class WhatsAppWebhookView(HomeAssistantView):
                 receipts.session_clear(self.hass, sender)
                 await self._async_reply(sender, "Discarded - nothing was added.")
                 return True
+            # "drop 3" before the confirm check: a misread line should cost
+            # that line, not the whole receipt.
+            drop = receipts.parse_drop_request(text, len(session["lines"]))
+            if drop is not None:
+                await self._async_drop_lines(sender, session, drop)
+                return True
+
             if answer not in receipts.CONFIRM_WORDS:
                 # Not an answer to us; let the agent field it and keep waiting.
                 return False
@@ -530,6 +537,38 @@ class WhatsAppWebhookView(HomeAssistantView):
             return True
 
         return False
+
+    async def _async_drop_lines(
+        self, sender: str, session: dict, drop: list[int]
+    ) -> None:
+        """Remove the named lines and re-show the receipt for confirmation."""
+        from . import receipts
+
+        if not drop:
+            await self._async_reply(
+                sender,
+                f"That receipt only has {len(session['lines'])} line(s) - "
+                "reply with a number from the list, or YES to add them all.",
+            )
+            return
+
+        removed = set(drop)
+        session["lines"] = [
+            line for index, line in enumerate(session["lines"])
+            if index not in removed
+        ]
+        _record(self.hass, "receipt_lines_dropped", str(len(removed)))
+        if not session["lines"]:
+            receipts.session_clear(self.hass, sender)
+            await self._async_reply(
+                sender, "That was every line - nothing was added."
+            )
+            return
+        await self._async_reply(
+            sender,
+            f"Dropped {len(removed)} line(s).\n\n"
+            + receipts.format_preview(session["lines"]),
+        )
 
     async def _async_finish_receipt(self, sender: str, session: dict) -> None:
         from . import receipts
