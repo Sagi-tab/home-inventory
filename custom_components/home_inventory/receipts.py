@@ -341,12 +341,24 @@ def _failure_message(err: Exception, mime: str | None) -> str:
     a photo goes down a path that works today.
     """
     detail = str(err)
-    if mime == "application/pdf" and "INVALID_ARGUMENT" in detail:
+    if "INVALID_ARGUMENT" not in detail:
+        return f"The AI task failed: {detail}"
+    if mime == "application/pdf":
         return (
             "I couldn't read that PDF - the AI model rejected it. Send a photo "
             "or screenshot of the receipt instead, which works reliably."
         )
-    return f"The AI task failed: {detail}"
+    # Same rejection on an image the provider is perfectly able to read, so
+    # the request itself is malformed rather than the receipt. In practice
+    # that means the AI Task entity's settings: a thinking level or budget
+    # the chosen model does not accept, or a model that takes no image input.
+    return (
+        "The AI model rejected the request itself, so this isn't about the "
+        "receipt. Check the AI Task entity's settings - a thinking level or "
+        "budget the model doesn't support, or a model that can't read "
+        "images, both fail this way. Undo the most recent change there and "
+        "try again."
+    )
 
 
 async def async_extract_items(
