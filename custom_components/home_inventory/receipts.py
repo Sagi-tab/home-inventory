@@ -54,50 +54,55 @@ DROP_WORDS = {
     "לא", "הסר", "הסירי", "בלי", "מחק", "חוץ", "ו",
 }
 
-# Two passes in one call. Naming a product in the same breath as reading it
-# invites the model to answer with a plausible supermarket item instead of the
-# faint one actually printed; transcribing first separates reading from
-# interpreting. The preamble costs nothing to parse - parse_json_reply already
-# takes the bracketed span out of surrounding prose.
-EXTRACT_INSTRUCTIONS = """Read the purchased products off this shopping receipt.
+# One pass. The two-step transcribe-then-convert prompt doubled the output and
+# hit Home Assistant's 3000-token default, and the guessing it was meant to
+# prevent is better addressed by telling the model what this household
+# actually buys - a garbled abbreviation resolves against a known product
+# instead of against everything a supermarket sells.
+EXTRACT_INSTRUCTIONS = """Extract the purchased products from this shopping receipt.
 
-Work in two steps.
+Israeli receipts are printed in Hebrew, right to left, on faint thermal \
+paper, and product names are heavily abbreviated. Work down the receipt and \
+return EVERY product line: a supermarket receipt usually has ten or more. Do \
+not stop early, do not summarise, and do not merge two lines of the same \
+product into one entry.
 
-STEP 1 - transcribe. Work down the receipt line by line and write out every \
-item line exactly as printed, character for character, including its quantity \
-and price. Israeli receipts are printed in Hebrew, right to left, on faint \
-thermal paper, and product names are heavily abbreviated. Transcribe the \
-abbreviation - do not expand it, do not translate it, and do not replace an \
-unclear word with a product that would make more sense. If a character is \
-unreadable, write what you can see. A supermarket receipt usually has ten or \
-more item lines; do not stop early and do not summarise.
-
-STEP 2 - convert your transcription to JSON.
-
-Rules for step 2:
-- One entry per product line you transcribed. Two lines of the same product \
-are two entries, never merged.
+Rules:
 - Drop the lines that are not products: totals, subtotals, VAT, change, \
 discounts, loyalty points, bottle deposits, payment method, store address, \
 phone numbers, dates and receipt numbers.
-- `name` is REQUIRED and must never be empty. It is the text you transcribed, \
-unchanged. For a Hebrew line put that same Hebrew text in both `name` and \
-`name_he`. Never translate it into English.
+- `name` is REQUIRED and must never be empty. Give the text as printed. Do \
+not translate it into English, do not expand an abbreviation, and never \
+replace an unclear word with a product that would make more sense. For a \
+Hebrew line put the same Hebrew text in both `name` and `name_he`.
+- `unsure` is true when you could not read the line confidently. Say so \
+rather than guessing - a flagged line can be corrected, an invented one \
+cannot.
 - `barcode` only when a barcode or long numeric product code is actually \
 printed on that line. Never invent one, and never use the line number, price \
 or receipt number as a barcode.
 - `quantity` is how many units were bought (default 1). If the line is priced \
 by weight, put the weight in `quantity` and the unit (kg/g) in `unit`.
 - `category` is a short free-text guess such as dairy, produce, meat, frozen, \
-bakery, cleaning, snacks. This is the only field you may infer.
+bakery, cleaning, snacks.
 - `perishable` is true for fresh food that spoils within weeks.
 
-End your answer with the JSON, shaped exactly like:
+Return ONLY raw JSON, no prose and no code fences, shaped exactly like:
 {"items": [{"name": "...", "name_he": "...", "barcode": "...", \
-"quantity": 1, "unit": "pcs", "category": "...", "perishable": true}]}
+"quantity": 1, "unit": "pcs", "category": "...", "perishable": true, \
+"unsure": false}]}
 
-Omit `barcode` and `name_he` when they do not apply. Return {"items": []} if \
-this is not a receipt."""
+Omit `barcode`, `name_he` and `unsure` when they do not apply. Return \
+{"items": []} if this is not a receipt."""
+
+# Enough to cover a household's regular shop without letting the prompt grow
+# without bound; search_products orders by updated_at, so this is the most
+# recently touched slice of the catalogue.
+CATALOGUE_LIMIT = 150
+
+# Enough of the model's reply to see whether it read the receipt, short
+# enough to paste into a chat. Product names, not secrets.
+LAST_REPLY_CHARS = 1500
 
 # Models rename this field constantly - product_name, title, description, and
 # for a Hebrew receipt very often only name_he. Dropping those entries is
@@ -330,6 +335,18 @@ def _log_reply(hass: HomeAssistant, task_name: str, raw: Any) -> None:
     else:
         _LOGGER.debug("[receipt] %s replied: %s", task_name, text[:4000])
 
+    # Also keep it where whatsapp_diagnostics can report it. Finding the
+    # right Home Assistant log has been the hard part of every failure in
+    # this pipeline; a service call that hands back the model's own words
+    # needs no log hunting at all.
+    stats = hass.data.setdefault(DOMAIN, {}).setdefault(
+        "wa_stats", {"counts": {}, "last_event": None, "last_event_at": None}
+    )
+    stats["last_ai_task"] = task_name
+    stats["last_ai_reply"] = text[:LAST_REPLY_CHARS]
+    stats["last_ai_reply_at"] = dt_util.utcnow().isoformat(timespec="seconds")
+    stats["last_ai_reply_truncated"] = len(text) > LAST_REPLY_CHARS
+
 
 def _failure_message(err: Exception, mime: str | None) -> str:
     """Turn a provider error into something the sender can act on.
@@ -341,22 +358,82 @@ def _failure_message(err: Exception, mime: str | None) -> str:
     a photo goes down a path that works today.
     """
     detail = str(err)
-    if mime == "application/pdf" and "INVALID_ARGUMENT" in detail:
+    if "INVALID_ARGUMENT" not in detail:
+        return f"The AI task failed: {detail}"
+    if mime == "application/pdf":
         return (
             "I couldn't read that PDF - the AI model rejected it. Send a photo "
             "or screenshot of the receipt instead, which works reliably."
         )
-    return f"The AI task failed: {detail}"
+    # Same rejection on an image the provider is perfectly able to read, so
+    # the request itself is malformed rather than the receipt. In practice
+    # that means the AI Task entity's settings: a thinking level or budget
+    # the chosen model does not accept, or a model that takes no image input.
+    return (
+        "The AI model rejected the request itself, so this isn't about the "
+        "receipt. Check the AI Task entity's settings - a thinking level or "
+        "budget the model doesn't support, or a model that can't read "
+        "images, both fail this way. Undo the most recent change there and "
+        "try again."
+    )
+
+
+async def _async_catalogue_context(hass: HomeAssistant, limit: int) -> str:
+    """List what this household already buys, for the model to match against.
+
+    Resolving an abbreviation against a known catalogue is a far easier task
+    than resolving it against everything a supermarket sells, and it is the
+    step that most improves naming on a faint Hebrew receipt. Doing it in the
+    prompt beats doing it afterwards with `find_similar_products`, because by
+    then the abbreviation has already been turned into a guess and the
+    printed text is gone.
+
+    Best-effort: a catalogue lookup failing must not cost the user the whole
+    receipt, so this degrades to no context rather than raising.
+    """
+    db = hass.data.get(DOMAIN, {}).get("db")
+    if db is None:
+        return ""
+    try:
+        # An empty query is LIKE '%%', i.e. every product, most recently
+        # updated first - no dedicated "list all" method needed.
+        products = await db.search_products("", limit=limit)
+    except Exception as err:  # noqa: BLE001 - context is optional by design
+        _LOGGER.debug("Catalogue context unavailable: %s", err)
+        return ""
+
+    names = []
+    seen = set()
+    for product in products or []:
+        name = str(
+            product.get("name_he") or product.get("name") or ""
+        ).strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    if not names:
+        return ""
+
+    return (
+        "\n\nThis household already buys the products below. When a receipt "
+        "line is one of these, reuse the name exactly as written here - that "
+        "is what an abbreviation on the receipt most likely refers to. A line "
+        "matching none of them is still a product: report it as printed.\n"
+        + "\n".join(f"- {name}" for name in names)
+    )
 
 
 async def async_extract_items(
     hass: HomeAssistant, media_content_id: str, mime: str = "image/jpeg"
 ) -> list[dict]:
     """Ask the vision model for the purchased lines."""
+    instructions = EXTRACT_INSTRUCTIONS + await _async_catalogue_context(
+        hass, CATALOGUE_LIMIT
+    )
     data = await _async_generate(
         hass,
         task_name="Home Inventory receipt",
-        instructions=EXTRACT_INSTRUCTIONS,
+        instructions=instructions,
         attachment=media_content_id,
         mime=mime,
     )
@@ -473,6 +550,7 @@ async def async_resolve_lines(hass: HomeAssistant, items: list[dict]) -> list[di
             "unit": str(item.get("unit") or "pcs").strip() or "pcs",
             "category": normalize_category(item.get("category")),
             "perishable": bool(item.get("perishable")),
+            "unsure": bool(item.get("unsure")),
             "product_id": None,
             "match": "new",
             "score": None,
@@ -570,8 +648,14 @@ def format_preview(lines: list[dict]) -> str:
             bits.append("(matched)")
         else:
             bits.append("(new)")
+        # A line the model could not read confidently is the one most worth
+        # a second look, so say so where the sender is already reading.
+        if line.get("unsure"):
+            bits.append("(?)")
         out.append(" ".join(bits))
     out.append("")
+    if any(line.get("unsure") for line in lines):
+        out.append("(?) means I wasn't sure I read that line correctly.")
     out.append(
         "Reply YES to add these, NO to discard, or the numbers of any lines "
         "I got wrong (e.g. \"no 3\" or \"2,5\") to drop them."
