@@ -883,6 +883,15 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
         "inbound_activity": stats["counts"] or "nothing received since restart",
         "inbound_last_event": stats["last_event"],
         "inbound_last_event_at": stats["last_event_at"],
+        # What the model actually said on the last receipt. "No products
+        # found" has several quite different causes that the WhatsApp reply
+        # cannot tell apart - an empty list, a shape we could not read, or a
+        # model that never looked at the image - and this separates them
+        # without going near the log files. Product names, not secrets.
+        "last_ai_task": stats.get("last_ai_task"),
+        "last_ai_reply": stats.get("last_ai_reply") or "no AI reply since restart",
+        "last_ai_reply_at": stats.get("last_ai_reply_at"),
+        "last_ai_reply_truncated": bool(stats.get("last_ai_reply_truncated")),
     }
 
 

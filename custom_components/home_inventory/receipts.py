@@ -100,6 +100,10 @@ Omit `barcode`, `name_he` and `unsure` when they do not apply. Return \
 # recently touched slice of the catalogue.
 CATALOGUE_LIMIT = 150
 
+# Enough of the model's reply to see whether it read the receipt, short
+# enough to paste into a chat. Product names, not secrets.
+LAST_REPLY_CHARS = 1500
+
 # Models rename this field constantly - product_name, title, description, and
 # for a Hebrew receipt very often only name_he. Dropping those entries is
 # indistinguishable from the model having missed the line, so accept any of
@@ -330,6 +334,18 @@ def _log_reply(hass: HomeAssistant, task_name: str, raw: Any) -> None:
         _LOGGER.info("[receipt] %s replied: %s", task_name, text[:4000])
     else:
         _LOGGER.debug("[receipt] %s replied: %s", task_name, text[:4000])
+
+    # Also keep it where whatsapp_diagnostics can report it. Finding the
+    # right Home Assistant log has been the hard part of every failure in
+    # this pipeline; a service call that hands back the model's own words
+    # needs no log hunting at all.
+    stats = hass.data.setdefault(DOMAIN, {}).setdefault(
+        "wa_stats", {"counts": {}, "last_event": None, "last_event_at": None}
+    )
+    stats["last_ai_task"] = task_name
+    stats["last_ai_reply"] = text[:LAST_REPLY_CHARS]
+    stats["last_ai_reply_at"] = dt_util.utcnow().isoformat(timespec="seconds")
+    stats["last_ai_reply_truncated"] = len(text) > LAST_REPLY_CHARS
 
 
 def _failure_message(err: Exception, mime: str | None) -> str:
