@@ -37,7 +37,6 @@ from .const import (
     RECEIPT_MIN_MATCH_SCORE,
     RECEIPT_SESSION_TTL,
     RECEIPT_STRONG_MATCH_SCORE,
-    WHATSAPP_MEDIA_URL,
     WHATSAPP_TIMEOUT,
 )
 from .lookup import normalize_category
@@ -122,41 +121,21 @@ class ReceiptError(HomeAssistantError):
 # ---------- media ----------
 
 
-async def async_download_media(hass: HomeAssistant, options: dict, media_id: str):
-    """Fetch WhatsApp media. Returns (bytes, mime_type).
+async def async_download_media(
+    hass: HomeAssistant, url: str, headers: dict[str, str], mime: str
+):
+    """Fetch an attachment WAHA has saved. Returns (bytes, mime_type).
 
-    Two hops: the media id resolves to a URL that lives about five minutes and
-    still requires the bearer token - fetching it unauthenticated returns 401.
+    ``url`` points at WAHA's file store and needs the WAHA API key, carried in
+    ``headers``.
     """
-    from .const import CONF_WA_ACCESS_TOKEN
-
-    token = options.get(CONF_WA_ACCESS_TOKEN)
-    if not token:
-        raise ReceiptError("WhatsApp access token is not configured.")
+    if mime and mime not in RECEIPT_ACCEPTED_MIME:
+        raise ReceiptError(f"I can't read {mime} files - send a photo or PDF.")
 
     session = async_get_clientsession(hass)
-    headers = {"Authorization": f"Bearer {token}"}
     timeout = aiohttp.ClientTimeout(total=WHATSAPP_TIMEOUT)
 
     try:
-        async with session.get(
-            WHATSAPP_MEDIA_URL.format(media_id=media_id),
-            headers=headers,
-            timeout=timeout,
-        ) as resp:
-            if resp.status >= 400:
-                raise ReceiptError(
-                    f"Could not look up the image ({resp.status})."
-                )
-            meta = await resp.json()
-
-        url = meta.get("url")
-        mime = (meta.get("mime_type") or "").split(";")[0].strip()
-        if not url:
-            raise ReceiptError("WhatsApp did not return a download URL.")
-        if mime and mime not in RECEIPT_ACCEPTED_MIME:
-            raise ReceiptError(f"I can't read {mime} files - send a photo or PDF.")
-
         async with session.get(url, headers=headers, timeout=timeout) as resp:
             if resp.status >= 400:
                 raise ReceiptError(f"Could not download the image ({resp.status}).")

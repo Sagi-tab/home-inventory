@@ -372,20 +372,10 @@ rename_product:
 send_expiry_alert:
   name: Send Expiry Alert (WhatsApp)
   description: >
-    Send the expiring-items digest over WhatsApp now. Returns a result with
-    'sent' plus a 'reason' explaining why nothing was sent (not_configured,
-    no_expiring_items, no_recipients, send_failed), the digest 'preview',
-    and Meta's error text on failure.
-  fields:
-    as_text:
-      name: Send as plain text
-      description: >
-        Send the digest as a free-form message instead of the approved
-        template. Only works within 24 hours of your last incoming WhatsApp
-        message, but lets you test the digest before Meta approves the
-        template.
-      default: false
-      selector: {boolean: {}}
+    Send the expiring-items digest over WhatsApp now, to every allowed sender.
+    Returns a result with 'sent' plus a 'reason' explaining why nothing was
+    sent (not_configured, no_expiring_items, no_recipients, send_failed), the
+    digest 'preview', and WAHA's error text on failure.
 
 process_receipt:
   name: Process Receipt
@@ -409,10 +399,11 @@ process_receipt:
 whatsapp_diagnostics:
   name: WhatsApp Diagnostics
   description: >
-    Report the resolved WhatsApp configuration: which settings are present,
-    the webhook URL to register with Meta, the conversation agent in use, and
-    the last send error. Secrets are reported as present/absent only, so the
-    output is safe to share.
+    Report the resolved WhatsApp (WAHA) setup: which settings are present, the
+    live WAHA session status, the webhook URL to configure in WAHA, the
+    conversation agent in use, recent inbound activity and the last send
+    error. Secrets are reported as present/absent only, so the output is safe
+    to share.
 
 update_shopping_quantity:
   name: Update shopping item quantity

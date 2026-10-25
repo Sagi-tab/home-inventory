@@ -1,5 +1,7 @@
-"""Config flow (single-instance) plus WhatsApp options."""
+"""Config flow (single-instance) plus WhatsApp (WAHA) options."""
 from __future__ import annotations
+
+import secrets
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -9,31 +11,25 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.helpers import selector
-from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
-    CONF_WA_ACCESS_TOKEN,
+    CONF_AI_TASK_ENTITY,
+    CONF_RECEIPTS_ENABLED,
     CONF_WA_AGENT_ID,
     CONF_WA_ALERT_DAYS,
     CONF_WA_ALERT_TIME,
     CONF_WA_ALLOWED_SENDERS,
-    CONF_WA_APP_SECRET,
+    CONF_WA_DEBUG,
     CONF_WA_ENABLED,
-    CONF_WA_PHONE_NUMBER_ID,
-    CONF_WA_TEMPLATE_LANG,
-    CONF_WA_TEMPLATE_NAME,
-    CONF_WA_VERIFY_TOKEN,
+    CONF_WAHA_API_KEY,
+    CONF_WAHA_HMAC_KEY,
+    CONF_WAHA_SESSION,
+    CONF_WAHA_URL,
+    CONF_WAHA_WEBHOOK_ID,
     DEFAULT_EXPIRING_DAYS,
     DEFAULT_WA_ALERT_TIME,
-    CONF_AI_TASK_ENTITY,
-    CONF_RECEIPTS_ENABLED,
-    CONF_WA_DEBUG,
-    CONF_WA_TEMPLATE_PARAM,
-    DEFAULT_WA_TEMPLATE_LANG,
-    DEFAULT_WA_TEMPLATE_NAME,
-    DEFAULT_WA_TEMPLATE_PARAM,
+    DEFAULT_WAHA_SESSION,
     DOMAIN,
-    WHATSAPP_WEBHOOK_PATH,
 )
 
 
@@ -47,6 +43,9 @@ def validate_options(user_input: dict) -> dict[str, str]:
     fails only later, when a receipt is actually sent.
     """
     errors: dict[str, str] = {}
+    url = str(user_input.get(CONF_WAHA_URL) or "").strip()
+    if url and not url.startswith(("http://", "https://")):
+        errors[CONF_WAHA_URL] = "invalid_url"
     if user_input.get(CONF_RECEIPTS_ENABLED) and not str(
         user_input.get(CONF_AI_TASK_ENTITY) or ""
     ).strip():
@@ -54,13 +53,20 @@ def validate_options(user_input: dict) -> dict[str, str]:
     return errors
 
 
+def new_webhook_id() -> str:
+    """Random id for the WAHA webhook; it is the only thing naming the endpoint."""
+    return secrets.token_hex(16)
+
+
 class HomeInventoryConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(self, user_input=None):
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
-        return self.async_create_entry(title="Home Inventory", data={})
+        return self.async_create_entry(
+            title="Home Inventory", data={CONF_WAHA_WEBHOOK_ID: new_webhook_id()}
+        )
 
     @staticmethod
     @callback
@@ -69,7 +75,7 @@ class HomeInventoryConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class HomeInventoryOptionsFlow(OptionsFlow):
-    """Configure the WhatsApp bridge."""
+    """Configure the WhatsApp bridge (WAHA)."""
 
     async def async_step_init(self, user_input=None):
         errors: dict[str, str] = {}
@@ -79,9 +85,7 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                 # Blank secrets mean "keep the stored value" so the form can be
                 # re-saved without retyping the token.
                 current = dict(self.config_entry.options)
-                for key in (
-                    CONF_WA_ACCESS_TOKEN, CONF_WA_APP_SECRET, CONF_WA_VERIFY_TOKEN,
-                ):
+                for key in (CONF_WAHA_API_KEY, CONF_WAHA_HMAC_KEY):
                     if not user_input.get(key) and current.get(key):
                         user_input[key] = current[key]
                 return self.async_create_entry(title="", data=user_input)
@@ -96,21 +100,22 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                     default=options.get(CONF_WA_ENABLED, False),
                 ): selector.BooleanSelector(),
                 vol.Optional(
-                    CONF_WA_PHONE_NUMBER_ID,
-                    default=options.get(CONF_WA_PHONE_NUMBER_ID, ""),
+                    CONF_WAHA_URL,
+                    default=options.get(CONF_WAHA_URL, ""),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+                ),
+                vol.Optional(
+                    CONF_WAHA_API_KEY, default=""
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_WAHA_SESSION,
+                    default=options.get(CONF_WAHA_SESSION, DEFAULT_WAHA_SESSION),
                 ): selector.TextSelector(),
                 vol.Optional(
-                    CONF_WA_ACCESS_TOKEN, default=""
-                ): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-                ),
-                vol.Optional(
-                    CONF_WA_VERIFY_TOKEN, default=""
-                ): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-                ),
-                vol.Optional(
-                    CONF_WA_APP_SECRET, default=""
+                    CONF_WAHA_HMAC_KEY, default=""
                 ): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
@@ -137,24 +142,6 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                     )
                 ),
                 vol.Optional(
-                    CONF_WA_TEMPLATE_NAME,
-                    default=options.get(
-                        CONF_WA_TEMPLATE_NAME, DEFAULT_WA_TEMPLATE_NAME
-                    ),
-                ): selector.TextSelector(),
-                vol.Optional(
-                    CONF_WA_TEMPLATE_LANG,
-                    default=options.get(
-                        CONF_WA_TEMPLATE_LANG, DEFAULT_WA_TEMPLATE_LANG
-                    ),
-                ): selector.TextSelector(),
-                vol.Optional(
-                    CONF_WA_TEMPLATE_PARAM,
-                    default=options.get(
-                        CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM
-                    ),
-                ): selector.TextSelector(),
-                vol.Optional(
                     CONF_WA_DEBUG,
                     default=options.get(CONF_WA_DEBUG, False),
                 ): selector.BooleanSelector(),
@@ -170,14 +157,16 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                 ),
             }
         )
-        # Show the exact callback URL to paste into the Meta app config.
-        try:
-            base_url = get_url(self.hass, prefer_external=True)
-        except NoURLAvailableError:
-            base_url = ""
+        # Show the exact webhook URL to put in the WAHA configuration.
+        from .whatsapp import webhook_url
+
         return self.async_show_form(
             step_id="init",
             data_schema=schema,
             errors=errors,
-            description_placeholders={"webhook": f"{base_url}{WHATSAPP_WEBHOOK_PATH}"},
+            description_placeholders={
+                "webhook": webhook_url(
+                    self.hass, {**self.config_entry.data, **self.config_entry.options}
+                )
+            },
         )
