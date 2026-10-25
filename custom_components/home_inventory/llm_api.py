@@ -25,7 +25,6 @@ from .const import (
     DOMAIN,
     LLM_API_ID,
     LLM_API_NAME,
-    LOCATIONS,
     SERVICE_ADD_ITEM,
     SERVICE_ADD_TO_SHOPPING,
     SERVICE_REMOVE_ITEM,
@@ -44,7 +43,9 @@ Guidelines:
 name to a product_id before removing or changing an item.
 - Expiration dates are ISO YYYY-MM-DD. Convert relative dates ("Friday", \
 "in two weeks") using today's date, given below.
-- Locations: {locations}.
+- Items are not tracked by storage location. When asked about a place \
+("what's in the fridge?", "what's in the pantry?"), list the inventory - \
+narrowed to the categories that fit, if any - rather than saying it is empty.
 - Categories: {categories}.
 - Keep replies short and plain-text: they are delivered over WhatsApp, which \
 has no markdown rendering.
@@ -80,7 +81,6 @@ class AddItemTool(_InventoryTool):
             vol.Optional("quantity"): vol.Coerce(float),
             vol.Optional("unit"): str,
             vol.Optional("category"): vol.In(CATEGORIES),
-            vol.Optional("location"): vol.In(LOCATIONS),
             vol.Optional("expiration_date"): str,
             vol.Optional("notes"): str,
             vol.Optional("target"): vol.In(["inventory", "shopping"]),
@@ -111,7 +111,6 @@ class RemoveItemTool(_InventoryTool):
         {
             vol.Required("product_id"): vol.Coerce(int),
             vol.Optional("quantity"): vol.Coerce(float),
-            vol.Optional("location"): vol.In(LOCATIONS),
             vol.Optional("add_to_shopping_list"): bool,
         }
     )
@@ -185,8 +184,8 @@ class SearchInventoryTool(_InventoryTool):
 
     name = "search_inventory"
     description = (
-        "Search the inventory by product name. Returns product_id, quantity, "
-        "location and expiration for each match. Use this to resolve a name to "
+        "Search the inventory by product name. Returns product_id, quantity "
+        "and expiration for each match. Use this to resolve a name to "
         "a product_id, or to answer 'do we have X?'."
     )
     parameters = vol.Schema({vol.Required("query"): str})
@@ -203,7 +202,6 @@ class SearchInventoryTool(_InventoryTool):
                 "name_he": r.get("product_name_he"),
                 "quantity": r.get("quantity"),
                 "unit": r.get("unit"),
-                "location": r.get("location"),
                 "expiration_date": r.get("expiration_date"),
                 "category": r.get("category"),
             }
@@ -215,27 +213,21 @@ class SearchInventoryTool(_InventoryTool):
 
 
 class ListInventoryTool(_InventoryTool):
-    """List stock, optionally filtered by location or category."""
+    """List stock, optionally filtered by category."""
 
     name = "list_inventory"
     description = (
         "List what is currently in the inventory, optionally filtered by "
-        "location or category. Use for 'what's in the fridge?'."
+        "category. Use for 'what do we have?' and for questions about a place "
+        "such as the fridge - items are not tracked by location."
     )
-    parameters = vol.Schema(
-        {
-            vol.Optional("location"): vol.In(LOCATIONS),
-            vol.Optional("category"): vol.In(CATEGORIES),
-        }
-    )
+    parameters = vol.Schema({vol.Optional("category"): vol.In(CATEGORIES)})
 
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict:
         args = tool_input.tool_args
         rows = await self._db(hass).list_inventory()
-        if location := args.get("location"):
-            rows = [r for r in rows if r.get("location") == location]
         if category := args.get("category"):
             rows = [r for r in rows if r.get("category") == category]
         items = [
@@ -244,7 +236,7 @@ class ListInventoryTool(_InventoryTool):
                 "name": r.get("product_name"),
                 "quantity": r.get("quantity"),
                 "unit": r.get("unit"),
-                "location": r.get("location"),
+                "category": r.get("category"),
                 "expiration_date": r.get("expiration_date"),
             }
             for r in rows
@@ -270,7 +262,6 @@ class ExpiringItemsTool(_InventoryTool):
                 "name": r.get("product_name"),
                 "quantity": r.get("quantity"),
                 "expiration_date": r.get("expiration_date"),
-                "location": r.get("location"),
             }
             for r in rows
         ]
@@ -345,10 +336,7 @@ class HomeInventoryLLMAPI(llm.API):
     async def async_get_api_instance(
         self, llm_context: llm.LLMContext
     ) -> llm.APIInstance:
-        prompt = API_PROMPT.format(
-            locations=", ".join(LOCATIONS),
-            categories=", ".join(CATEGORIES),
-        )
+        prompt = API_PROMPT.format(categories=", ".join(CATEGORIES))
         # The model needs today's date to resolve "expires Friday".
         prompt += f"\nToday's date is {dt_util.now().date().isoformat()}."
         return llm.APIInstance(

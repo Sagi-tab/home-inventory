@@ -120,14 +120,37 @@ def _record(hass: HomeAssistant, event: str, detail: str | None = None) -> None:
 def _trace(options: dict, msg: str, *args: Any) -> None:
     """Log the message flow.
 
-    With the debug toggle on this logs at info so it shows up in the default
-    Home Assistant log; otherwise it stays at debug. That saves the user
-    editing configuration.yaml just to see why a message went nowhere.
+    With the debug toggle on this logs at info, which _apply_debug_logging
+    makes visible; otherwise it stays at debug. That saves the user editing
+    configuration.yaml just to see why a message went nowhere.
     """
     if options.get(CONF_WA_DEBUG):
         _LOGGER.info("[whatsapp] " + msg, *args)
     else:
         _LOGGER.debug("[whatsapp] " + msg, *args)
+
+
+# The integration's package logger (custom_components.home_inventory), so the
+# receipt trace is covered too.
+_PACKAGE_LOGGER = logging.getLogger(__package__)
+_debug_level_raised = False
+
+
+def _apply_debug_logging(enabled: bool) -> None:
+    """Let info records through while the verbose toggle is on.
+
+    Home Assistant's default log level is warning, which would swallow the
+    info-level trace. Only ever raise verbosity, so a level the user set in
+    configuration.yaml (e.g. debug) is left alone, and only undo our own change.
+    """
+    global _debug_level_raised
+    if enabled:
+        if _PACKAGE_LOGGER.getEffectiveLevel() > logging.INFO:
+            _PACKAGE_LOGGER.setLevel(logging.INFO)
+            _debug_level_raised = True
+    elif _debug_level_raised:
+        _PACKAGE_LOGGER.setLevel(logging.NOTSET)
+        _debug_level_raised = False
 
 
 def missing_config(options: dict) -> list[str]:
@@ -859,6 +882,7 @@ def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["wa_options"] = options
     hass.data[DOMAIN]["wa_client"] = WahaClient(hass, options)
+    _apply_debug_logging(bool(options.get(CONF_WA_DEBUG)))
 
     # The handler reads options from hass.data on each request, so it only
     # needs registering once even when options are updated later.
@@ -918,3 +942,4 @@ def async_unload_whatsapp(hass: HomeAssistant) -> None:
         unsub()
     if webhook_id := data.pop("wa_webhook_registered", None):
         webhook.async_unregister(hass, webhook_id)
+    _apply_debug_logging(False)
