@@ -13,21 +13,18 @@
   "options": {
     "step": {
       "init": {
-        "title": "WhatsApp bridge",
-        "description": "Control the inventory and receive expiry alerts over WhatsApp (Meta Cloud API).\n\nWebhook URL to register in the Meta app (Callback URL): {webhook}\n\nLeave token fields blank to keep the currently stored value.",
+        "title": "WhatsApp bridge (WAHA)",
+        "description": "Control the inventory, send receipt photos and get expiry alerts over WhatsApp, through a WAHA (WhatsApp HTTP API) server such as the WAHA add-on.\n\nIn WAHA, set the webhook URL to:\n{webhook}\nwith the \"message\" event. If you set an HMAC key in WAHA, enter the same key below.\n\nLeave the key fields blank to keep the currently stored values.",
         "data": {
           "whatsapp_enabled": "Enable WhatsApp",
-          "whatsapp_phone_number_id": "Phone number ID",
-          "whatsapp_access_token": "Access token",
-          "whatsapp_verify_token": "Webhook verify token",
-          "whatsapp_app_secret": "App secret (signature verification)",
-          "whatsapp_allowed_senders": "Allowed sender numbers (comma-separated, country code first, no +)",
+          "waha_url": "WAHA URL, e.g. http://<waha-host>:3000",
+          "waha_api_key": "WAHA API key",
+          "waha_session": "WAHA session name",
+          "waha_webhook_hmac_key": "Webhook HMAC key (optional, must match WAHA)",
+          "whatsapp_allowed_senders": "Allowed numbers - may send commands and receive alerts (comma-separated, country code first, no +)",
           "whatsapp_agent_id": "Conversation agent",
           "whatsapp_alert_time": "Daily alert time",
           "whatsapp_alert_days": "Alert for items expiring within (days)",
-          "whatsapp_template_name": "Alert template name",
-          "whatsapp_template_language": "Alert template language code",
-          "whatsapp_template_parameter": "Alert template variable name, e.g. expired_items (leave blank if the template uses a numbered variable instead)",
           "whatsapp_debug": "Verbose logging (logs each incoming message, the agent reply and the send result to the Home Assistant log)",
           "receipts_enabled": "Read receipt photos sent over WhatsApp",
           "ai_task_entity": "AI Task entity used to read receipts (required when receipt scanning is on)"
@@ -35,7 +32,8 @@
       }
     },
     "error": {
-      "ai_task_required": "Receipt scanning needs an AI Task entity — pick one above, or turn receipt scanning off. If the list is empty, add an AI Task entry to your AI integration (Settings → Devices & Services → Google Generative AI → Add entry) and reopen this form."
+      "ai_task_required": "Receipt scanning needs an AI Task entity — pick one above, or turn receipt scanning off. If the list is empty, add an AI Task entry to your AI integration (Settings → Devices & Services → Google Generative AI → Add entry) and reopen this form.",
+      "invalid_url": "Enter the full WAHA address, starting with http:// or https://"
     }
   },
   "services": {
@@ -45,7 +43,7 @@
     },
     "whatsapp_diagnostics": {
       "name": "WhatsApp diagnostics",
-      "description": "Report the resolved WhatsApp configuration"
+      "description": "Report the resolved WhatsApp (WAHA) configuration and session status"
     },
     "scan_barcode": {
       "name": "Scan barcode",

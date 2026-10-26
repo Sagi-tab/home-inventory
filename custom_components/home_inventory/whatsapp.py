@@ -1,15 +1,19 @@
-"""WhatsApp (Meta Cloud API) bridge: outbound messages + inbound webhook.
+"""WhatsApp bridge over WAHA (WhatsApp HTTP API): outbound messages + inbound webhook.
+
+WAHA links a WhatsApp number as a companion device (a QR code scanned once,
+like WhatsApp Web), so there are no message templates, no 24-hour window and
+no per-message cost: any message can be sent at any time.
 
 Outbound
-    Free-form text replies are only permitted inside the 24-hour customer
-    service window that the user's own message opens, so unprompted alerts
-    (the daily expiry digest) go out as a pre-approved template instead.
+    ``POST {waha}/api/sendText`` with the session name and a ``<digits>@c.us``
+    chat id, authenticated with the WAHA API key.
 
 Inbound
-    Meta cannot present a Home Assistant bearer token, so the webhook view is
-    unauthenticated (``requires_auth = False``) and instead verified three ways:
-    the ``X-Hub-Signature-256`` HMAC, a sender allowlist, and message-id
-    de-duplication (Meta retries deliveries that aren't acknowledged quickly).
+    WAHA POSTs every event to a Home Assistant webhook. The webhook only
+    accepts requests from the local network and its id is random, so only
+    something on the LAN that knows the id can reach it. On top of that an
+    optional HMAC key is checked, the sender must be on the allowlist, and
+    message ids are de-duplicated because WAHA retries failed deliveries.
 """
 from __future__ import annotations
 
@@ -21,55 +25,55 @@ import re
 from collections import deque
 from datetime import datetime, time as dt_time
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
-from homeassistant.components import conversation
-from homeassistant.components.http import HomeAssistantView
+from homeassistant.components import conversation, webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.util import dt as dt_util
+from yarl import URL
 
 from .const import (
-    CONF_WA_ACCESS_TOKEN,
+    CONF_RECEIPTS_ENABLED,
     CONF_WA_AGENT_ID,
-    CONF_WA_DEBUG,
     CONF_WA_ALERT_DAYS,
     CONF_WA_ALERT_TIME,
     CONF_WA_ALLOWED_SENDERS,
-    CONF_WA_APP_SECRET,
-    CONF_RECEIPTS_ENABLED,
+    CONF_WA_DEBUG,
     CONF_WA_ENABLED,
-    CONF_WA_PHONE_NUMBER_ID,
-    CONF_WA_TEMPLATE_LANG,
-    CONF_WA_TEMPLATE_NAME,
-    CONF_WA_TEMPLATE_PARAM,
-    CONF_WA_VERIFY_TOKEN,
+    CONF_WAHA_API_KEY,
+    CONF_WAHA_HMAC_KEY,
+    CONF_WAHA_SESSION,
+    CONF_WAHA_URL,
+    CONF_WAHA_WEBHOOK_ID,
     DEFAULT_EXPIRING_DAYS,
     DEFAULT_WA_ALERT_TIME,
-    DEFAULT_WA_TEMPLATE_LANG,
-    DEFAULT_WA_TEMPLATE_NAME,
-    DEFAULT_WA_TEMPLATE_PARAM,
+    DEFAULT_WAHA_SESSION,
     DOMAIN,
     LLM_API_ID,
+    RECEIPT_ACCEPTED_MIME,
     WA_MAX_BODY,
-    WA_MAX_TEMPLATE_PARAM,
-    WHATSAPP_API_URL,
     WHATSAPP_TIMEOUT,
-    WHATSAPP_WEBHOOK_PATH,
 )
 from .storage import Database
 
 _LOGGER = logging.getLogger(__name__)
 
-# Remember recently handled message ids so Meta's retries are no-ops.
+# Remember recently handled message ids so WAHA's retries are no-ops.
 _SEEN_MAX = 200
 
 _WHITESPACE_RE = re.compile(r"\s+")
-_TEMPLATE_SEPARATOR = " • "
+
+# Chat id suffixes. Phone numbers are "<digits>@c.us" (some engines report
+# "@s.whatsapp.net"); "@lid" is WhatsApp's hidden per-user id, which newer
+# accounts send from and which has to be mapped back to a phone number.
+_PHONE_SUFFIXES = ("@c.us", "@s.whatsapp.net")
+_LID_SUFFIX = "@lid"
 
 
 def _digits(value: str) -> str:
@@ -83,6 +87,19 @@ def _mask(number: str | None) -> str:
     if len(digits) <= 6:
         return "***"
     return f"{digits[:3]}***{digits[-4:]}"
+
+
+def _chat_id(number: str) -> str:
+    """WAHA chat id for a phone number (country code first, no +)."""
+    return f"{_digits(number)}@c.us"
+
+
+def _allowed_numbers(options: dict) -> list[str]:
+    """The allowlist, which doubles as the digest recipient list."""
+    numbers = options.get(CONF_WA_ALLOWED_SENDERS) or []
+    if isinstance(numbers, str):
+        numbers = [p.strip() for p in numbers.split(",")]
+    return [_digits(p) for p in numbers if _digits(p)]
 
 
 def _record(hass: HomeAssistant, event: str, detail: str | None = None) -> None:
@@ -103,9 +120,9 @@ def _record(hass: HomeAssistant, event: str, detail: str | None = None) -> None:
 def _trace(options: dict, msg: str, *args: Any) -> None:
     """Log the message flow.
 
-    With the debug toggle on this logs at info so it shows up in the default
-    Home Assistant log; otherwise it stays at debug. That saves the user
-    editing configuration.yaml just to see why a message went nowhere.
+    With the debug toggle on this logs at info, which _apply_debug_logging
+    makes visible; otherwise it stays at debug. That saves the user editing
+    configuration.yaml just to see why a message went nowhere.
     """
     if options.get(CONF_WA_DEBUG):
         _LOGGER.info("[whatsapp] " + msg, *args)
@@ -113,122 +130,37 @@ def _trace(options: dict, msg: str, *args: Any) -> None:
         _LOGGER.debug("[whatsapp] " + msg, *args)
 
 
-class WhatsAppClient:
-    """Thin wrapper over the Meta Cloud API messages endpoint."""
+# The integration's package logger (custom_components.home_inventory), so the
+# receipt trace is covered too.
+_PACKAGE_LOGGER = logging.getLogger(__package__)
+_debug_level_raised = False
 
-    def __init__(self, hass: HomeAssistant, options: dict) -> None:
-        self.hass = hass
-        self._options = options
-        # Meta's rejection reason from the most recent send, surfaced by the
-        # send_expiry_alert service so failures are diagnosable from the UI.
-        self.last_error: str | None = None
 
-    @property
-    def configured(self) -> bool:
-        return bool(
-            self._options.get(CONF_WA_ENABLED)
-            and self._options.get(CONF_WA_PHONE_NUMBER_ID)
-            and self._options.get(CONF_WA_ACCESS_TOKEN)
-        )
+def _apply_debug_logging(enabled: bool) -> None:
+    """Let info records through while the verbose toggle is on.
 
-    def missing_config(self) -> list[str]:
-        """Settings still needed before a message can be sent out."""
-        missing = []
-        if not self._options.get(CONF_WA_ENABLED):
-            missing.append("whatsapp_enabled")
-        if not self._options.get(CONF_WA_PHONE_NUMBER_ID):
-            missing.append("phone_number_id")
-        if not self._options.get(CONF_WA_ACCESS_TOKEN):
-            missing.append("access_token")
-        return missing
+    Home Assistant's default log level is warning, which would swallow the
+    info-level trace. Only ever raise verbosity, so a level the user set in
+    configuration.yaml (e.g. debug) is left alone, and only undo our own change.
+    """
+    global _debug_level_raised
+    if enabled:
+        if _PACKAGE_LOGGER.getEffectiveLevel() > logging.INFO:
+            _PACKAGE_LOGGER.setLevel(logging.INFO)
+            _debug_level_raised = True
+    elif _debug_level_raised:
+        _PACKAGE_LOGGER.setLevel(logging.NOTSET)
+        _debug_level_raised = False
 
-    @property
-    def _url(self) -> str:
-        return WHATSAPP_API_URL.format(
-            phone_number_id=self._options[CONF_WA_PHONE_NUMBER_ID]
-        )
 
-    async def _post(self, payload: dict) -> bool:
-        session = async_get_clientsession(self.hass)
-        headers = {
-            "Authorization": f"Bearer {self._options[CONF_WA_ACCESS_TOKEN]}",
-            "Content-Type": "application/json",
-        }
-        try:
-            async with session.post(
-                self._url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=WHATSAPP_TIMEOUT),
-            ) as resp:
-                if resp.status >= 400:
-                    # Meta returns a JSON error body explaining the rejection
-                    # (expired token, template not approved, outside the 24h
-                    # window, ...) - it is the only diagnostic there is.
-                    body = await resp.text()
-                    self.last_error = f"HTTP {resp.status}: {body[:300]}"
-                    _LOGGER.error(
-                        "WhatsApp send failed (%s): %s", resp.status, body[:500]
-                    )
-                    return False
-                self.last_error = None
-                return True
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            self.last_error = str(err)
-            _LOGGER.error("WhatsApp send error: %s", err)
-            return False
-
-    async def async_send_text(self, to: str, body: str) -> bool:
-        """Send a free-form text message (24h customer service window only)."""
-        if not self.configured:
-            return False
-        return await self._post(
-            {
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "text",
-                "text": {"body": body[:WA_MAX_BODY]},
-            }
-        )
-
-    async def async_send_template(
-        self,
-        to: str,
-        body_param: str,
-        *,
-        name: str,
-        language: str,
-        parameter_name: str | None = None,
-    ) -> bool:
-        """Send a pre-approved template with a single body variable.
-
-        ``parameter_name`` selects the template's variable style. Named
-        variables ({{expired_items}}) require the name to be sent alongside the
-        value and must match the approved template exactly; omitting it sends a
-        positional variable ({{1}}) instead.
-        """
-        if not self.configured:
-            return False
-        # Defensive: Meta rejects the whole send (132018) if a parameter carries
-        # a newline, tab or a long run of spaces, whatever the caller passed.
-        parameter: dict[str, str] = {
-            "type": "text",
-            "text": _collapse_whitespace(body_param)[:WA_MAX_TEMPLATE_PARAM],
-        }
-        if parameter_name:
-            parameter["parameter_name"] = parameter_name
-        return await self._post(
-            {
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "template",
-                "template": {
-                    "name": name,
-                    "language": {"code": language},
-                    "components": [{"type": "body", "parameters": [parameter]}],
-                },
-            }
-        )
+def missing_config(options: dict) -> list[str]:
+    """Settings still needed before a message can be sent out."""
+    missing = []
+    if not options.get(CONF_WA_ENABLED):
+        missing.append("whatsapp_enabled")
+    if not str(options.get(CONF_WAHA_URL) or "").strip():
+        missing.append("waha_url")
+    return missing
 
 
 def missing_inbound_config(options: dict) -> list[str]:
@@ -239,24 +171,153 @@ def missing_inbound_config(options: dict) -> list[str]:
     looks like "nothing happens" from the outside.
     """
     missing = []
-    if not options.get(CONF_WA_APP_SECRET):
-        missing.append("app_secret")
-    if not options.get(CONF_WA_VERIFY_TOKEN):
-        missing.append("verify_token")
-    senders = options.get(CONF_WA_ALLOWED_SENDERS) or []
-    if isinstance(senders, str):
-        senders = [p.strip() for p in senders.split(",")]
-    if not [p for p in senders if str(p).strip()]:
+    if not options.get(CONF_WAHA_WEBHOOK_ID):
+        missing.append("webhook_id")
+    if not _allowed_numbers(options):
         missing.append("allowed_senders")
     return missing
 
 
-class WhatsAppWebhookView(HomeAssistantView):
-    """Receives Meta webhook callbacks. Unauthenticated by necessity."""
+class WahaClient:
+    """Thin wrapper over the WAHA REST API."""
 
-    url = WHATSAPP_WEBHOOK_PATH
-    name = f"{DOMAIN}:whatsapp"
-    requires_auth = False
+    def __init__(self, hass: HomeAssistant, options: dict) -> None:
+        self.hass = hass
+        self._options = options
+        # WAHA's rejection reason from the most recent call, surfaced by the
+        # send_expiry_alert and diagnostics services.
+        self.last_error: str | None = None
+        # lid -> phone digits. A lid never changes owner, so this only grows.
+        self._lid_cache: dict[str, str] = {}
+
+    @property
+    def configured(self) -> bool:
+        return not missing_config(self._options)
+
+    @property
+    def session(self) -> str:
+        return str(self._options.get(CONF_WAHA_SESSION) or DEFAULT_WAHA_SESSION)
+
+    @property
+    def base_url(self) -> str:
+        return str(self._options.get(CONF_WAHA_URL) or "").strip().rstrip("/")
+
+    @property
+    def headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        if api_key := self._options.get(CONF_WAHA_API_KEY):
+            headers["X-Api-Key"] = str(api_key)
+        return headers
+
+    async def _request(
+        self, method: str, path: str, payload: dict | None = None
+    ) -> tuple[int, Any]:
+        """Call WAHA. Returns (status, parsed body); status 0 on a network error."""
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.request(
+                method,
+                f"{self.base_url}{path}",
+                json=payload,
+                headers=self.headers,
+                timeout=aiohttp.ClientTimeout(total=WHATSAPP_TIMEOUT),
+            ) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    # WAHA's error body ("session not found", "unauthorized",
+                    # ...) is the only diagnostic there is.
+                    self.last_error = f"HTTP {resp.status}: {text[:300]}"
+                    return resp.status, None
+                try:
+                    return resp.status, await resp.json(content_type=None)
+                except ValueError:
+                    return resp.status, text
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            self.last_error = f"{type(err).__name__}: {err}"
+            return 0, None
+
+    async def async_send_text(self, to: str, body: str) -> bool:
+        """Send a text message to a phone number."""
+        if not self.configured:
+            return False
+        status, _ = await self._request(
+            "POST",
+            "/api/sendText",
+            {"session": self.session, "chatId": _chat_id(to), "text": body[:WA_MAX_BODY]},
+        )
+        if status and status < 400:
+            self.last_error = None
+            return True
+        _LOGGER.error("WhatsApp send to %s failed: %s", _mask(to), self.last_error)
+        return False
+
+    async def async_session_status(self) -> dict[str, Any]:
+        """The WAHA session's state, e.g. WORKING or SCAN_QR_CODE."""
+        if not self.base_url:
+            return {"status": "not_configured"}
+        status, data = await self._request(
+            "GET", f"/api/sessions/{quote(self.session, safe='')}"
+        )
+        if not status:
+            return {"status": "unreachable", "error": self.last_error}
+        if status >= 400 or not isinstance(data, dict):
+            return {"status": "error", "error": self.last_error}
+        me = data.get("me") or {}
+        return {
+            "status": data.get("status"),
+            "engine": (data.get("engine") or {}).get("engine"),
+            "linked_number": _mask((me.get("id") or "").split("@")[0]) if me else None,
+        }
+
+    async def async_resolve_lid(self, lid: str) -> str | None:
+        """Map a hidden ``@lid`` id to the sender's phone number, if WAHA knows it."""
+        if lid in self._lid_cache:
+            return self._lid_cache[lid]
+        status, data = await self._request(
+            "GET",
+            f"/api/{quote(self.session, safe='')}/lids/{quote(lid, safe='')}",
+        )
+        phone = _digits(data.get("pn") or "") if isinstance(data, dict) else ""
+        if status and status < 400 and phone:
+            self._lid_cache[lid] = phone
+            return phone
+        return None
+
+    def media_url(self, url: str) -> str | None:
+        """Rebase a media URL from a webhook onto the configured WAHA address.
+
+        WAHA builds media links from its own idea of its hostname (often
+        ``localhost``), which is wrong from Home Assistant's side. Keeping only
+        the path also means the API key is never sent anywhere but WAHA.
+        """
+        parsed = URL(url)
+        if not parsed.path.startswith("/api/files/"):
+            return None
+        return f"{self.base_url}{parsed.raw_path_qs}"
+
+
+async def _async_sender_number(
+    client: WahaClient, message: dict
+) -> str | None:
+    """Phone number (digits) of whoever sent ``message``, or None to ignore it."""
+    sender = str(message.get("from") or "")
+    if sender.endswith(_PHONE_SUFFIXES):
+        return _digits(sender.split("@")[0])
+    if sender.endswith(_LID_SUFFIX):
+        # Some engines put the phone number alongside the lid in their raw
+        # data; otherwise ask WAHA's lid mapping.
+        raw = message.get("_data")
+        key = (raw.get("key") or {}) if isinstance(raw, dict) else {}
+        for candidate in (key.get("senderPn"), key.get("remoteJidAlt")):
+            if candidate and str(candidate).endswith(_PHONE_SUFFIXES):
+                return _digits(str(candidate).split("@")[0])
+        return await client.async_resolve_lid(sender)
+    # Groups (@g.us), status updates and newsletters are never commands.
+    return None
+
+
+class WhatsAppInbound:
+    """Handles messages delivered by the WAHA webhook."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -266,114 +327,104 @@ class WhatsAppWebhookView(HomeAssistantView):
     def _options(self) -> dict:
         return self.hass.data.get(DOMAIN, {}).get("wa_options", {})
 
-    async def get(self, request: web.Request) -> web.Response:
-        """Meta's subscription handshake: echo hub.challenge back verbatim."""
-        params = request.query
-        verify_token = self._options.get(CONF_WA_VERIFY_TOKEN)
-        if (
-            params.get("hub.mode") == "subscribe"
-            and verify_token
-            and hmac.compare_digest(
-                str(params.get("hub.verify_token", "")), str(verify_token)
-            )
-        ):
-            _trace(self._options, "verification handshake accepted")
-            _record(self.hass, "verification_accepted")
-            return web.Response(text=params.get("hub.challenge", ""))
-        _LOGGER.warning(
-            "WhatsApp webhook verification failed (mode=%s, verify token %s)",
-            params.get("hub.mode"),
-            "configured" if verify_token else "MISSING in options",
-        )
-        _record(self.hass, "verification_failed")
-        return web.Response(status=403, text="verification failed")
+    @property
+    def _client(self) -> WahaClient | None:
+        return self.hass.data.get(DOMAIN, {}).get("wa_client")
 
     def _signature_ok(self, raw: bytes, header: str | None) -> bool:
-        """Validate X-Hub-Signature-256 against the Meta app secret."""
-        secret = self._options.get(CONF_WA_APP_SECRET)
-        if not secret:
-            # No secret configured - cannot verify, so refuse rather than
-            # accept unauthenticated writes on a public endpoint.
-            _LOGGER.error(
-                "Rejecting WhatsApp webhook: no app secret configured, so no "
-                "incoming message can be verified. Set it in the Home "
-                "Inventory options (Meta: App settings -> Basic -> App secret)"
-            )
+        """Validate WAHA's X-Webhook-Hmac (sha512 of the raw body), when a key is set."""
+        key = self._options.get(CONF_WAHA_HMAC_KEY)
+        if not key:
+            return True
+        if not header:
             return False
-        if not header or not header.startswith("sha256="):
-            return False
-        expected = hmac.new(
-            str(secret).encode(), raw, hashlib.sha256
-        ).hexdigest()
-        return hmac.compare_digest(expected, header[len("sha256="):])
+        expected = hmac.new(str(key).encode(), raw, hashlib.sha512).hexdigest()
+        return hmac.compare_digest(expected, header.strip().lower())
 
-    async def post(self, request: web.Request) -> web.Response:
+    async def async_handle_webhook(
+        self, hass: HomeAssistant, webhook_id: str, request: web.Request
+    ) -> web.Response:
         raw = await request.read()
-        _trace(self._options, "POST received (%s bytes)", len(raw))
-        _record(self.hass, "post_received", f"{len(raw)} bytes")
-        if not self._signature_ok(raw, request.headers.get("X-Hub-Signature-256")):
-            _LOGGER.warning("WhatsApp webhook signature rejected")
-            _record(self.hass, "rejected_bad_signature")
-            return web.Response(status=403, text="bad signature")
+        options = self._options
+        _trace(options, "webhook POST received (%s bytes)", len(raw))
+        _record(hass, "post_received", f"{len(raw)} bytes")
+
+        if not options.get(CONF_WA_ENABLED):
+            _record(hass, "ignored_disabled")
+            return web.Response(text="disabled")
+
+        if not self._signature_ok(raw, request.headers.get("X-Webhook-Hmac")):
+            _LOGGER.warning(
+                "WhatsApp webhook HMAC rejected - check that the WAHA HMAC key "
+                "matches the one in the Home Inventory options"
+            )
+            _record(hass, "rejected_bad_signature")
+            return web.Response(status=401, text="bad signature")
 
         try:
-            payload = await request.json()
+            event = await request.json()
         except ValueError:
-            _record(self.hass, "rejected_bad_json")
+            _record(hass, "rejected_bad_json")
             return web.Response(status=400, text="bad json")
 
-        # Always 200 quickly so Meta stops retrying; process in the background.
-        self.hass.async_create_task(self._async_handle_payload(payload))
+        kind = event.get("event")
+        if kind != "message":
+            # Acks, presence, session status... only incoming messages matter.
+            _trace(options, "ignoring %s event", kind)
+            _record(hass, "ignored_event", str(kind))
+            return web.Response(text="ignored")
+
+        client = self._client
+        if client is not None and event.get("session") not in (None, client.session):
+            _trace(options, "ignoring message for session %s", event.get("session"))
+            _record(hass, "ignored_other_session", str(event.get("session")))
+            return web.Response(text="ignored")
+
+        # Answer immediately so WAHA does not retry; process in the background.
+        hass.async_create_task(self._async_handle_message(event.get("payload") or {}))
         return web.Response(text="ok")
 
-    async def _async_handle_payload(self, payload: dict) -> None:
-        options = self._options
-        handled = 0
-        for entry in payload.get("entry", []) or []:
-            for change in entry.get("changes", []) or []:
-                value = change.get("value") or {}
-                # Delivery/read receipts arrive on the same webhook - ignore.
-                if not value.get("messages"):
-                    # Worth surfacing: receipts arriving while messages never do
-                    # means the webhook works but the 'messages' field is not
-                    # subscribed in the Meta app configuration.
-                    _trace(
-                        options,
-                        "payload carried no messages (field=%s, keys=%s)",
-                        change.get("field"),
-                        sorted(value.keys()),
-                    )
-                    _record(
-                        self.hass,
-                        "payload_without_messages",
-                        ",".join(sorted(value.keys())) or "empty",
-                    )
-                    continue
-                for message in value["messages"]:
-                    handled += 1
-                    try:
-                        await self._async_handle_message(message)
-                    except Exception:  # noqa: BLE001 - never break the loop
-                        _LOGGER.exception("Error handling WhatsApp message")
-        _trace(options, "payload processed, %s message(s)", handled)
-
     async def _async_handle_message(self, message: dict) -> None:
-        options = self._options
-        msg_id = message.get("id")
-        sender = message.get("from")
-        _trace(
-            options,
-            "message %s from %s type=%s",
-            msg_id,
-            _mask(sender),
-            message.get("type"),
-        )
+        try:
+            await self._async_process(message)
+        except Exception:  # noqa: BLE001 - a bad message must not kill the bridge
+            _LOGGER.exception("Error handling WhatsApp message")
 
+    async def _async_process(self, message: dict) -> None:
+        options = self._options
+        client = self._client
+        if client is None:
+            return
+
+        msg_id = message.get("id")
+        if message.get("fromMe"):
+            # The bot's own replies come back as events too.
+            _trace(options, "own message %s ignored", msg_id)
+            return
         if msg_id:
             if msg_id in self._seen:
-                _trace(options, "duplicate %s ignored (Meta retry)", msg_id)
+                _trace(options, "duplicate %s ignored (WAHA retry)", msg_id)
                 return
             self._seen.append(msg_id)
+
+        sender = await _async_sender_number(client, message)
+        _trace(
+            options,
+            "message %s from %s (%s) media=%s",
+            msg_id,
+            _mask(sender),
+            message.get("from"),
+            message.get("hasMedia"),
+        )
+        if sender is None:
+            if str(message.get("from") or "").endswith(_LID_SUFFIX):
+                _LOGGER.warning(
+                    "Ignoring WhatsApp message: could not map %s to a phone "
+                    "number. Save the sender as a contact on the bot's phone",
+                    message.get("from"),
+                )
+                _record(self.hass, "rejected_unresolved_lid")
+            return
 
         _record(self.hass, "message_received", f"from {_mask(sender)}")
         if not self._sender_allowed(sender):
@@ -384,21 +435,13 @@ class WhatsAppWebhookView(HomeAssistantView):
             _record(self.hass, "rejected_sender_not_allowed", _mask(sender))
             return
 
-        msg_type = message.get("type")
-        if msg_type in ("image", "document"):
-            await self._async_handle_receipt(sender, message, msg_type)
+        if message.get("hasMedia"):
+            await self._async_handle_media(sender, message.get("media") or {})
             return
 
-        if msg_type != "text":
-            _trace(options, "non-text message (%s), replying with a hint", msg_type)
-            await self._async_reply(
-                sender, "Send me text, or a photo of a receipt."
-            )
-            return
-
-        text = (message.get("text") or {}).get("body", "").strip()
+        text = str(message.get("body") or "").strip()
         if not text:
-            _trace(options, "empty text body, nothing to do")
+            _trace(options, "empty message body, nothing to do")
             return
 
         # A pending receipt gets first refusal on the reply: "yes" means confirm
@@ -419,7 +462,16 @@ class WhatsAppWebhookView(HomeAssistantView):
                 _mask(sender),
             )
 
-    async def _async_handle_receipt(self, sender: str, message: dict, kind: str) -> None:
+    async def _async_handle_media(self, sender: str, media: dict) -> None:
+        """Route an attachment: receipts are read, anything else gets a hint."""
+        mime = str(media.get("mimetype") or "").split(";")[0].strip()
+        if mime not in RECEIPT_ACCEPTED_MIME:
+            _trace(self._options, "unsupported attachment (%s), replying with a hint", mime)
+            await self._async_reply(sender, "Send me text, or a photo of a receipt.")
+            return
+        await self._async_handle_receipt(sender, media, mime)
+
+    async def _async_handle_receipt(self, sender: str, media: dict, mime: str) -> None:
         """Download a photo/PDF, extract the items, and offer them for confirm."""
         from . import receipts
 
@@ -428,20 +480,27 @@ class WhatsAppWebhookView(HomeAssistantView):
             await self._async_reply(sender, "Receipt scanning is turned off.")
             return
 
-        payload = message.get(kind) or {}
-        media_id = payload.get("id")
-        if not media_id:
-            await self._async_reply(sender, "I couldn't find an image in that.")
+        client = self._client
+        url = client.media_url(str(media.get("url") or "")) if client else None
+        if not url:
+            # WAHA reports why it could not fetch the file from WhatsApp.
+            _LOGGER.warning(
+                "WhatsApp attachment has no downloadable file: %s",
+                media.get("error") or "no media url",
+            )
+            await self._async_reply(
+                sender, "I couldn't download that file - please send it again."
+            )
             return
 
-        _record(self.hass, "receipt_received", kind)
-        _trace(options, "receipt %s from %s, media=%s", kind, _mask(sender), media_id)
+        _record(self.hass, "receipt_received", mime)
+        _trace(options, "receipt %s from %s", mime, _mask(sender))
         await self._async_reply(sender, "Got it - reading the receipt...")
 
         path = None
         try:
             data, mime = await receipts.async_download_media(
-                self.hass, options, media_id
+                self.hass, url, client.headers, mime
             )
             path, content_id = await receipts.async_stage_media(self.hass, data, mime)
             items = await receipts.async_extract_items(
@@ -593,16 +652,11 @@ class WhatsAppWebhookView(HomeAssistantView):
             )
         await self._async_reply(sender, " ".join(summary))
 
-    def _sender_allowed(self, sender: str | None) -> bool:
-        if not sender:
-            return False
-        allowed = self._options.get(CONF_WA_ALLOWED_SENDERS) or []
-        if isinstance(allowed, str):
-            allowed = [p.strip() for p in allowed.split(",")]
-        allowed = [_digits(p) for p in allowed if str(p).strip()]
+    def _sender_allowed(self, sender: str) -> bool:
+        allowed = _allowed_numbers(self._options)
         if not allowed:
-            # An empty allowlist on a public endpoint would let anyone who
-            # learns the number drive the inventory - refuse instead.
+            # An empty allowlist would let anyone who learns the number drive
+            # the inventory - refuse instead.
             _LOGGER.error("No WhatsApp allowed senders configured; ignoring message")
             return False
         return _digits(sender) in allowed
@@ -632,12 +686,10 @@ class WhatsAppWebhookView(HomeAssistantView):
             return "Done."
 
     async def _async_reply(self, to: str, body: str) -> None:
-        client: WhatsAppClient | None = self.hass.data.get(DOMAIN, {}).get("wa_client")
+        client = self._client
         if client is None:
             _LOGGER.error("Cannot reply: WhatsApp client not set up")
             return
-        # The user just messaged us, so the 24h window is open: plain text is
-        # allowed here and no template is needed.
         ok = await client.async_send_text(to, body)
         _trace(self._options, "reply to %s %s", _mask(to),
                "sent" if ok else f"FAILED: {client.last_error}")
@@ -649,7 +701,7 @@ class WhatsAppWebhookView(HomeAssistantView):
 
 
 def _collapse_whitespace(text: str) -> str:
-    """Flatten whitespace so a value is safe to use as a template parameter."""
+    """Flatten whitespace so one item stays on one line."""
     return _WHITESPACE_RE.sub(" ", str(text)).strip()
 
 
@@ -671,42 +723,10 @@ def _entries(items: list[dict]) -> list[str]:
     return entries
 
 
-def _join_for_template(entries: list[str], limit: int) -> str:
-    """Join entries onto one line, dropping the overflow into a "+N more" tail."""
-    kept: list[str] = []
-    used = 0
-    for index, entry in enumerate(entries):
-        cost = len(entry) + (len(_TEMPLATE_SEPARATOR) if kept else 0)
-        remaining = len(entries) - index - 1
-        tail = len(f" (+{remaining} more)") if remaining else 0
-        if used + cost + tail > limit:
-            break
-        kept.append(entry)
-        used += cost
-
-    if not kept:
-        # A single oversized entry still beats sending nothing at all.
-        return entries[0][: limit - 1].rstrip() + "…" if entries else ""
-
-    joined = _TEMPLATE_SEPARATOR.join(kept)
-    dropped = len(entries) - len(kept)
-    if dropped:
-        joined += f" (+{dropped} more)"
-    return joined
-
-
-def _format_expiring(items: list[dict], *, multiline: bool = True) -> str:
-    """Render expiring rows as a WhatsApp-friendly list.
-
-    Template parameters may not contain newlines, tabs or runs of more than
-    four spaces (Meta error 132018), and the rendered body is capped at 1024
-    characters - so the template form is a single sanitised line. Free-form
-    text messages have no such restriction and stay one item per line.
-    """
-    entries = _entries(items)
-    if multiline:
-        return "\n".join(f"• {entry}" for entry in entries)
-    return _join_for_template(entries, WA_MAX_TEMPLATE_PARAM)
+def _format_expiring(items: list[dict], days: int) -> str:
+    """Render the expiring rows as a WhatsApp message, one item per line."""
+    header = f"🕒 {len(items)} item(s) expiring within {days} day(s):"
+    return "\n".join([header, *(f"• {entry}" for entry in _entries(items))])
 
 
 def _parse_time(value: str) -> dt_time:
@@ -718,22 +738,25 @@ def _parse_time(value: str) -> dt_time:
     return datetime.strptime(DEFAULT_WA_ALERT_TIME, "%H:%M:%S").time()
 
 
-async def async_send_expiry_digest(
-    hass: HomeAssistant, *, as_text: bool = False
-) -> dict[str, Any]:
+def webhook_url(hass: HomeAssistant, options: dict) -> str:
+    """The address WAHA should POST events to (reachable from the LAN)."""
+    webhook_id = options.get(CONF_WAHA_WEBHOOK_ID) or "<not set>"
+    try:
+        base = get_url(hass, allow_external=False, allow_ip=True)
+    except NoURLAvailableError:
+        base = "http://<home-assistant-ip>:8123"
+    return f"{base}/api/webhook/{webhook_id}"
+
+
+async def async_send_expiry_digest(hass: HomeAssistant) -> dict[str, Any]:
     """Send the expiring-items digest now.
 
     Returns a result dict rather than a bare boolean: "nothing was sent" has
-    several very different causes (not configured, nothing expiring, Meta
+    several very different causes (not configured, nothing expiring, WAHA
     rejected it) and the caller needs to tell them apart.
-
-    ``as_text`` sends the digest as a free-form message instead of the
-    template. That only works inside the 24h window opened by the user's own
-    message, but it allows the digest to be tested before Meta has approved
-    the template.
     """
     data = hass.data.get(DOMAIN, {})
-    client: WhatsAppClient | None = data.get("wa_client")
+    client: WahaClient | None = data.get("wa_client")
     options: dict = data.get("wa_options", {})
     db: Database | None = data.get("db")
 
@@ -741,7 +764,7 @@ async def async_send_expiry_digest(
         return {"sent": False, "reason": "integration_not_ready"}
 
     if not client.configured:
-        missing = client.missing_config()
+        missing = missing_config(options)
         _LOGGER.warning("WhatsApp digest skipped; missing config: %s", missing)
         return {"sent": False, "reason": "not_configured", "missing": missing}
 
@@ -760,38 +783,13 @@ async def async_send_expiry_digest(
             "item_count": 0,
         }
 
-    recipients = options.get(CONF_WA_ALLOWED_SENDERS) or []
-    if isinstance(recipients, str):
-        recipients = [p.strip() for p in recipients.split(",")]
-    recipients = [p for p in recipients if str(p).strip()]
+    recipients = _allowed_numbers(options)
     if not recipients:
         _LOGGER.warning("WhatsApp digest skipped; no recipient numbers configured")
         return {"sent": False, "reason": "no_recipients", "item_count": len(items)}
 
-    # One item per line for free-form text; a single sanitised line for the
-    # template, whose parameter may not contain newlines.
-    body = _format_expiring(items, multiline=as_text)
-    template = options.get(CONF_WA_TEMPLATE_NAME) or DEFAULT_WA_TEMPLATE_NAME
-    language = options.get(CONF_WA_TEMPLATE_LANG) or DEFAULT_WA_TEMPLATE_LANG
-    # Missing key -> named default; explicitly blank -> positional {{1}}.
-    param_name = options.get(CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM)
-
-    delivered: list[str] = []
-    for recipient in recipients:
-        if as_text:
-            ok = await client.async_send_text(recipient, body)
-        else:
-            # Unprompted, so it must be a template - free-form text would be
-            # rejected outside the 24h window.
-            ok = await client.async_send_template(
-                recipient,
-                body,
-                name=template,
-                language=language,
-                parameter_name=param_name,
-            )
-        if ok:
-            delivered.append(recipient)
+    body = _format_expiring(items, days)
+    delivered = [r for r in recipients if await client.async_send_text(r, body)]
 
     result: dict[str, Any] = {
         "sent": bool(delivered),
@@ -799,13 +797,10 @@ async def async_send_expiry_digest(
         "item_count": len(items),
         "recipients": len(recipients),
         "delivered": len(delivered),
-        "mode": "text" if as_text else "template",
         "preview": body,
     }
     if not delivered:
         result["error"] = client.last_error or "unknown"
-        if not as_text:
-            result["template"] = template
     return result
 
 
@@ -817,18 +812,8 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
     """
     data = hass.data.get(DOMAIN, {})
     options: dict = data.get("wa_options", {})
-    client: WhatsAppClient | None = data.get("wa_client")
+    client: WahaClient | None = data.get("wa_client")
     db: Database | None = data.get("db")
-
-    senders = options.get(CONF_WA_ALLOWED_SENDERS) or []
-    if isinstance(senders, str):
-        senders = [p.strip() for p in senders.split(",")]
-    senders = [p for p in senders if str(p).strip()]
-
-    try:
-        webhook_url = f"{get_url(hass, prefer_external=True)}{WHATSAPP_WEBHOOK_PATH}"
-    except NoURLAvailableError:
-        webhook_url = f"(no external URL configured){WHATSAPP_WEBHOOK_PATH}"
 
     days = int(options.get(CONF_WA_ALERT_DAYS) or DEFAULT_EXPIRING_DAYS)
     expiring = len(await db.get_expiring_items(days)) if db else None
@@ -846,40 +831,35 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
     agent = options.get(CONF_WA_AGENT_ID)
     return {
         "enabled": bool(options.get(CONF_WA_ENABLED)),
-        "webhook_url": webhook_url,
-        "webhook_registered": bool(data.get("wa_view_registered")),
+        "waha_url": client.base_url if client else None,
+        "waha_session": client.session if client else None,
+        # Live check: WORKING means linked and ready, SCAN_QR_CODE means the
+        # number still has to be linked in the WAHA dashboard.
+        "waha_session_status": (
+            await client.async_session_status() if client else None
+        ),
+        "webhook_url": webhook_url(hass, options),
+        "webhook_registered": bool(data.get("wa_webhook_registered")),
         "llm_api_registered": bool(data.get("llm_api_registered")),
         "llm_api_id": LLM_API_ID,
         "debug_logging": bool(options.get(CONF_WA_DEBUG)),
         # Presence only - never the values themselves.
-        "phone_number_id_set": bool(options.get(CONF_WA_PHONE_NUMBER_ID)),
-        "access_token_set": bool(options.get(CONF_WA_ACCESS_TOKEN)),
-        "verify_token_set": bool(options.get(CONF_WA_VERIFY_TOKEN)),
-        "app_secret_set": bool(options.get(CONF_WA_APP_SECRET)),
-        "missing_for_sending": (
-            client.missing_config() if client else ["client_not_setup"]
-        ),
+        "api_key_set": bool(options.get(CONF_WAHA_API_KEY)),
+        "hmac_key_set": bool(options.get(CONF_WAHA_HMAC_KEY)),
+        "missing_for_sending": missing_config(options),
         # Inbound is reported separately: outbound can be perfectly configured
         # while every incoming message is rejected.
         "missing_for_receiving": missing_inbound,
         "inbound_ready": not missing_inbound,
-        "recipients": [_mask(s) for s in senders],
+        "recipients": [_mask(s) for s in _allowed_numbers(options)],
         "conversation_agent": agent or "<default agent>",
         "agent_configured": bool(agent),
         "alert_time": options.get(CONF_WA_ALERT_TIME) or DEFAULT_WA_ALERT_TIME,
         "alert_days": days,
         "expiring_now": expiring,
-        "template": options.get(CONF_WA_TEMPLATE_NAME) or DEFAULT_WA_TEMPLATE_NAME,
-        "template_language": (
-            options.get(CONF_WA_TEMPLATE_LANG) or DEFAULT_WA_TEMPLATE_LANG
-        ),
-        "template_parameter": options.get(
-            CONF_WA_TEMPLATE_PARAM, DEFAULT_WA_TEMPLATE_PARAM
-        ),
         "last_send_error": client.last_error if client else None,
-        # Inbound activity since the last restart. All-zero counts mean Meta
-        # has never delivered anything, which is a Meta-side problem rather
-        # than anything to fix in Home Assistant.
+        # Inbound activity since the last restart. All-zero counts mean WAHA
+        # has never delivered anything: check its webhook URL and events.
         "inbound_activity": stats["counts"] or "nothing received since restart",
         "inbound_last_event": stats["last_event"],
         "inbound_last_event_at": stats["last_event_at"],
@@ -897,22 +877,29 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
 
 @callback
 def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Register the webhook view, client and daily digest schedule."""
+    """Register the webhook, client and daily digest schedule."""
     options = {**entry.data, **entry.options}
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["wa_options"] = options
-    hass.data[DOMAIN]["wa_client"] = WhatsAppClient(hass, options)
+    hass.data[DOMAIN]["wa_client"] = WahaClient(hass, options)
+    _apply_debug_logging(bool(options.get(CONF_WA_DEBUG)))
 
-    # The view reads options from hass.data on each request, so it only needs
-    # registering once even when options are updated later.
-    if not hass.data[DOMAIN].get("wa_view_registered"):
-        hass.http.register_view(WhatsAppWebhookView(hass))
-        hass.data[DOMAIN]["wa_view_registered"] = True
-        _LOGGER.info(
-            "WhatsApp webhook available at %s (LLM API id: %s)",
-            WHATSAPP_WEBHOOK_PATH,
-            LLM_API_ID,
+    # The handler reads options from hass.data on each request, so it only
+    # needs registering once even when options are updated later.
+    webhook_id = options.get(CONF_WAHA_WEBHOOK_ID)
+    if webhook_id and not hass.data[DOMAIN].get("wa_webhook_registered"):
+        inbound = WhatsAppInbound(hass)
+        webhook.async_register(
+            hass,
+            DOMAIN,
+            "Home Inventory WhatsApp (WAHA)",
+            webhook_id,
+            inbound.async_handle_webhook,
+            local_only=True,
+            allowed_methods=["POST"],
         )
+        hass.data[DOMAIN]["wa_webhook_registered"] = webhook_id
+        _LOGGER.info("WhatsApp webhook registered (LLM API id: %s)", LLM_API_ID)
 
     # Replace any previous schedule so option changes take effect immediately.
     if unsub := hass.data[DOMAIN].pop("wa_unsub_timer", None):
@@ -921,8 +908,11 @@ def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if not options.get(CONF_WA_ENABLED):
         return
 
-    # Surface an inbound misconfiguration at startup: without these, incoming
-    # messages are rejected silently as far as the user can tell.
+    # Surface a misconfiguration at startup: without these, messages go
+    # nowhere silently as far as the user can tell.
+    if missing := missing_config(options):
+        _LOGGER.warning("WhatsApp is enabled but cannot send; missing: %s",
+                        ", ".join(missing))
     if missing := missing_inbound_config(options):
         _LOGGER.warning(
             "WhatsApp is enabled but incoming messages will be rejected; "
@@ -942,3 +932,14 @@ def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
         minute=alert_at.minute,
         second=alert_at.second,
     )
+
+
+@callback
+def async_unload_whatsapp(hass: HomeAssistant) -> None:
+    """Undo async_setup_whatsapp."""
+    data = hass.data.get(DOMAIN, {})
+    if unsub := data.pop("wa_unsub_timer", None):
+        unsub()
+    if webhook_id := data.pop("wa_webhook_registered", None):
+        webhook.async_unregister(hass, webhook_id)
+    _apply_debug_logging(False)

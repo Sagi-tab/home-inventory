@@ -44,45 +44,45 @@ API_BASE = "/api/home_inventory"
 FRONTEND_URL = "/home_inventory_static"
 CARD_FILENAME = "home-inventory-card.js"
 
-# ---------- WhatsApp (Meta Cloud API) ----------
-WHATSAPP_WEBHOOK_PATH = f"{API_BASE}/whatsapp"
-WHATSAPP_API_URL = "https://graph.facebook.com/v21.0/{phone_number_id}/messages"
+# ---------- WhatsApp (WAHA - WhatsApp HTTP API) ----------
 WHATSAPP_TIMEOUT = 15
 
 # Config entry option keys
 CONF_WA_ENABLED = "whatsapp_enabled"
-CONF_WA_PHONE_NUMBER_ID = "whatsapp_phone_number_id"
-CONF_WA_ACCESS_TOKEN = "whatsapp_access_token"
-CONF_WA_VERIFY_TOKEN = "whatsapp_verify_token"
-CONF_WA_APP_SECRET = "whatsapp_app_secret"
+CONF_WAHA_URL = "waha_url"
+CONF_WAHA_API_KEY = "waha_api_key"
+CONF_WAHA_SESSION = "waha_session"
+CONF_WAHA_HMAC_KEY = "waha_webhook_hmac_key"
+CONF_WAHA_WEBHOOK_ID = "waha_webhook_id"
 CONF_WA_ALLOWED_SENDERS = "whatsapp_allowed_senders"
 CONF_WA_AGENT_ID = "whatsapp_agent_id"
 CONF_WA_ALERT_TIME = "whatsapp_alert_time"
 CONF_WA_ALERT_DAYS = "whatsapp_alert_days"
-CONF_WA_TEMPLATE_NAME = "whatsapp_template_name"
-CONF_WA_TEMPLATE_LANG = "whatsapp_template_language"
-CONF_WA_TEMPLATE_PARAM = "whatsapp_template_parameter"
 CONF_WA_DEBUG = "whatsapp_debug"
 CONF_RECEIPTS_ENABLED = "receipts_enabled"
 CONF_AI_TASK_ENTITY = "ai_task_entity"
 
-DEFAULT_WA_TEMPLATE_NAME = "inventory_alert"
-DEFAULT_WA_TEMPLATE_LANG = "en"
-# Meta rejects templates whose body variable is a bare number when the value is
-# free text, so the template uses a named parameter ({{expired_items}}). Set
-# this to an empty string to fall back to a positional {{1}} template.
-DEFAULT_WA_TEMPLATE_PARAM = "expired_items"
+# Meta Cloud API settings from before 0.8.0, dropped by the entry migration.
+LEGACY_META_OPTIONS = (
+    "whatsapp_phone_number_id",
+    "whatsapp_access_token",
+    "whatsapp_verify_token",
+    "whatsapp_app_secret",
+    "whatsapp_template_name",
+    "whatsapp_template_language",
+    "whatsapp_template_parameter",
+)
+
+DEFAULT_WAHA_SESSION = "default"
 DEFAULT_WA_ALERT_TIME = "09:00:00"
 
 # The LLM tool API exposing inventory control to a conversation agent.
 LLM_API_ID = "home_inventory"
 LLM_API_NAME = "Home Inventory"
 
-# Max WhatsApp message body length (Meta caps text bodies at 4096).
+# Cap on a single outgoing message. WhatsApp allows far more, but a reply this
+# long is unreadable on a phone anyway.
 WA_MAX_BODY = 4000
-# A rendered template body may not exceed 1024 characters including the
-# template's own static text, so the variable is held well under that.
-WA_MAX_TEMPLATE_PARAM = 900
 
 # Categories (used for seed + UI)
 CATEGORIES = [
@@ -109,9 +109,6 @@ LOCATIONS = [
 ]
 
 # ---------- Receipt scanning ----------
-# Media IDs from webhooks are downloaded in two steps: the id resolves to a
-# short-lived URL which still requires the bearer token.
-WHATSAPP_MEDIA_URL = "https://graph.facebook.com/v21.0/{media_id}"
 # Refuse anything larger; a phone photo of a receipt is well under this.
 RECEIPT_MAX_BYTES = 12 * 1024 * 1024
 RECEIPT_ACCEPTED_MIME = ("image/jpeg", "image/png", "image/webp", "application/pdf")

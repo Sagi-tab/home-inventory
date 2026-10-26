@@ -611,12 +611,12 @@ def async_register_services(
         # Imported here to keep the WhatsApp bridge optional at import time.
         from .whatsapp import async_send_expiry_digest
 
-        return await async_send_expiry_digest(
-            hass, as_text=bool(call.data.get("as_text", False))
-        )
+        return await async_send_expiry_digest(hass)
 
     hass.services.async_register(
         DOMAIN, SERVICE_SEND_EXPIRY_ALERT, handle_send_expiry_alert,
+        # as_text is accepted but ignored: with WAHA every message is plain
+        # text, and old automations still pass it.
         schema=vol.Schema({vol.Optional("as_text"): cv.boolean}),
         supports_response="optional",
     )
