@@ -1,11 +1,11 @@
 """Barcode lookup: local cache first, then Open Food Facts fallback."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import aiohttp
-import async_timeout
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -114,7 +114,7 @@ class BarcodeLookup:
         url = OFF_API_URL.format(barcode=barcode)
         headers = {"User-Agent": OFF_USER_AGENT}
         try:
-            async with async_timeout.timeout(OFF_TIMEOUT):
+            async with asyncio.timeout(OFF_TIMEOUT):
                 async with session.get(url, headers=headers) as resp:
                     if resp.status != 200:
                         _LOGGER.debug("OFF returned %s for %s", resp.status, barcode)
