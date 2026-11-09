@@ -29,9 +29,9 @@ from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
-from homeassistant.components import conversation, webhook
+from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Context, HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.network import NoURLAvailableError, get_url
@@ -39,7 +39,6 @@ from homeassistant.util import dt as dt_util
 from yarl import URL
 
 from .const import (
-    CONF_RECEIPTS_ENABLED,
     CONF_WA_AGENT_ID,
     CONF_WA_ALERT_DAYS,
     CONF_WA_ALERT_TIME,
@@ -60,6 +59,7 @@ from .const import (
     WA_MAX_BODY,
     WHATSAPP_TIMEOUT,
 )
+from .chat import ChatInbound
 from .storage import Database
 
 _LOGGER = logging.getLogger(__name__)
@@ -336,20 +336,59 @@ async def _async_sender_number(
     return None
 
 
-class WhatsAppInbound:
+class WhatsAppInbound(ChatInbound):
     """Handles messages delivered by the WAHA webhook."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
-        self.hass = hass
-        self._seen: deque[str] = deque(maxlen=_SEEN_MAX)
+    channel = "whatsapp"
+    stats_key = "wa_stats"
 
-    @property
-    def _options(self) -> dict:
-        return self.hass.data.get(DOMAIN, {}).get("wa_options", {})
+    def __init__(self, hass: HomeAssistant) -> None:
+        super().__init__(hass)
+        self._seen: deque[str] = deque(maxlen=_SEEN_MAX)
 
     @property
     def _client(self) -> WahaClient | None:
         return self.hass.data.get(DOMAIN, {}).get("wa_client")
+
+    # ---------- ChatInbound hooks ----------
+
+    def _sender_allowed(self, sender: str) -> bool:
+        allowed = _allowed_numbers(self._options)
+        if not allowed:
+            # An empty allowlist would let anyone who learns the number drive
+            # the inventory - refuse instead.
+            _LOGGER.error("No WhatsApp allowed senders configured; ignoring message")
+            return False
+        return _digits(sender) in allowed
+
+    def _person_for(self, sender: str) -> str | None:
+        reminders = self._reminders
+        return reminders.person_for_number(sender) if reminders else None
+
+    def _user_for(self, sender: str) -> str | None:
+        reminders = self._reminders
+        return reminders.user_for_number(sender) if reminders else None
+
+    def _conversation_id(self, sender: str) -> str:
+        return f"{DOMAIN}_wa_{_digits(sender)}"
+
+    def _mask(self, sender: str | None) -> str:
+        return _mask(sender)
+
+    async def _async_reply(self, to: str, body: str) -> None:
+        client = self._client
+        if client is None:
+            _LOGGER.error("Cannot reply: WhatsApp client not set up")
+            return
+        ok = await client.async_send_text(to, body)
+        self._trace("reply to %s %s", _mask(to),
+                    "sent" if ok else f"FAILED: {client.last_error}")
+        self._record(
+            "reply_sent" if ok else "reply_failed",
+            None if ok else client.last_error,
+        )
+
+    # ---------- WAHA webhook ----------
 
     def _signature_ok(self, raw: bytes, header: str | None) -> bool:
         """Validate WAHA's X-Webhook-Hmac (sha512 of the raw body), when a key is set."""
@@ -455,79 +494,29 @@ class WhatsAppInbound:
             _record(self.hass, "rejected_sender_not_allowed", _mask(sender))
             return
 
-        reminders = self.hass.data.get(DOMAIN, {}).get("reminders")
-        person = reminders.person_for_number(sender) if reminders else None
-
-        # A shared location completes a reminder that is waiting for one;
-        # otherwise the agent gets it as text to act on.
         if (location := _shared_location(message)) is not None:
             lat, lon, label = location
-            _trace(options, "location shared by %s", _mask(sender))
-            if person and (
-                reply := await reminders.async_attach_shared_location(person, lat, lon)
-            ):
-                await self._async_reply(sender, reply)
-                return
-            text = f"[shared location: {lat:.6f}, {lon:.6f}]" + (
-                f" {label}" if label else ""
+            await self.async_handle_location(
+                sender, lat, lon, label, str(message.get("body") or "")
             )
-            # Some engines put the map thumbnail in the body; only pass real text.
-            body = str(message.get("body") or "").strip()
-            if body and len(body) < 500:
-                text += f"\n{body}"
-            answer = await self._async_converse(text, sender)
-            if answer:
-                await self._async_reply(sender, answer)
             return
 
         if message.get("hasMedia"):
             await self._async_handle_media(sender, message.get("media") or {})
             return
 
-        text = str(message.get("body") or "").strip()
-        if not text:
-            _trace(options, "empty message body, nothing to do")
-            return
-
-        # A pending receipt gets first refusal on the reply: "yes" means confirm
-        # the receipt, not something for the agent to interpret. Anything it
-        # does not consume falls through to normal conversation.
-        if await self._async_receipt_reply(sender, text):
-            return
-
-        # A Google Maps link answers a reminder that is waiting for its place.
-        if person and (reply := await reminders.async_attach_maps_link(person, text)):
-            await self._async_reply(sender, reply)
-            return
-
-        _trace(options, "asking agent %r: %r",
-               options.get(CONF_WA_AGENT_ID) or "<default>", text[:200])
-        answer = await self._async_converse(text, sender)
-        _trace(options, "agent answered: %r", (answer or "")[:200])
-        if answer:
-            await self._async_reply(sender, answer)
-        else:
-            _LOGGER.warning(
-                "Conversation agent returned no reply for %s; nothing sent",
-                _mask(sender),
-            )
+        await self.async_handle_text(sender, str(message.get("body") or ""))
 
     async def _async_handle_media(self, sender: str, media: dict) -> None:
         """Route an attachment: receipts are read, anything else gets a hint."""
-        mime = str(media.get("mimetype") or "").split(";")[0].strip()
-        if mime not in RECEIPT_ACCEPTED_MIME:
-            _trace(self._options, "unsupported attachment (%s), replying with a hint", mime)
-            await self._async_reply(sender, "Send me text, or a photo of a receipt.")
-            return
-        await self._async_handle_receipt(sender, media, mime)
-
-    async def _async_handle_receipt(self, sender: str, media: dict, mime: str) -> None:
-        """Download a photo/PDF, extract the items, and offer them for confirm."""
         from . import receipts
 
-        options = self._options
-        if not options.get(CONF_RECEIPTS_ENABLED, True):
-            await self._async_reply(sender, "Receipt scanning is turned off.")
+        mime = str(media.get("mimetype") or "").split(";")[0].strip()
+        if mime not in RECEIPT_ACCEPTED_MIME:
+            self._trace("unsupported attachment (%s), replying with a hint", mime)
+            await self._async_reply(sender, "Send me text, or a photo of a receipt.")
+            return
+        if not await self.async_receipts_enabled(sender):
             return
 
         client = self._client
@@ -543,216 +532,13 @@ class WhatsAppInbound:
             )
             return
 
-        _record(self.hass, "receipt_received", mime)
-        _trace(options, "receipt %s from %s", mime, _mask(sender))
-        await self._async_reply(sender, "Got it - reading the receipt...")
-
-        path = None
-        try:
-            data, mime = await receipts.async_download_media(
+        async def fetch() -> tuple[bytes, str]:
+            # The WAHA API key (in the headers) only ever goes to WAHA itself.
+            return await receipts.async_download_media(
                 self.hass, url, client.headers, mime
             )
-            path, content_id = await receipts.async_stage_media(self.hass, data, mime)
-            items = await receipts.async_extract_items(
-                self.hass, content_id, mime
-            )
-            if not items:
-                _record(self.hass, "receipt_empty")
-                await self._async_reply(
-                    sender,
-                    "I couldn't find any products on that receipt. Try a "
-                    "photo taken straight on, in good light, close enough "
-                    "that the item lines are readable - and one photo per "
-                    "part if the receipt is long.",
-                )
-                return
 
-            lines = await receipts.async_resolve_lines(self.hass, items)
-            receipts.session_start(self.hass, sender, lines)
-            _record(self.hass, "receipt_extracted", f"{len(lines)} lines")
-            await self._async_reply(sender, receipts.format_preview(lines))
-        except receipts.ReceiptError as err:
-            _record(self.hass, "receipt_failed", str(err)[:80])
-            _LOGGER.error("Receipt processing failed: %s", err)
-            await self._async_reply(sender, str(err))
-        except Exception as err:  # noqa: BLE001
-            _record(self.hass, "receipt_failed", type(err).__name__)
-            _LOGGER.exception("Receipt processing crashed")
-            await self._async_reply(sender, f"Something went wrong: {err}")
-        finally:
-            if path is not None:
-                await receipts.async_cleanup(self.hass, path)
-
-    async def _async_receipt_reply(self, sender: str, text: str) -> bool:
-        """Handle a reply belonging to a pending receipt.
-
-        Returns True when the message was consumed, so the caller knows not to
-        pass it on to the conversation agent.
-        """
-        from . import receipts
-
-        session = receipts.session_get(self.hass, sender)
-        if not session:
-            return False
-
-        answer = text.strip().lower()
-
-        if session["state"] == "awaiting_confirm":
-            if answer in receipts.CANCEL_WORDS:
-                receipts.session_clear(self.hass, sender)
-                await self._async_reply(sender, "Discarded - nothing was added.")
-                return True
-            # "drop 3" before the confirm check: a misread line should cost
-            # that line, not the whole receipt.
-            drop = receipts.parse_drop_request(text, len(session["lines"]))
-            if drop is not None:
-                await self._async_drop_lines(sender, session, drop)
-                return True
-
-            if answer not in receipts.CONFIRM_WORDS:
-                # Not an answer to us; let the agent field it and keep waiting.
-                return False
-
-            lines = session["lines"]
-            perishables = [
-                (i, line) for i, line in enumerate(lines) if receipts.is_perishable(line)
-            ]
-            if perishables:
-                session["state"] = "awaiting_dates"
-                session["pending_dates"] = perishables
-                await self._async_reply(
-                    sender, receipts.format_date_prompt(perishables)
-                )
-                return True
-            await self._async_finish_receipt(sender, session)
-            return True
-
-        if session["state"] == "awaiting_dates":
-            perishables = session["pending_dates"]
-            if answer not in receipts.SKIP_WORDS:
-                try:
-                    dates = await receipts.async_parse_dates(
-                        self.hass, text, perishables
-                    )
-                except receipts.ReceiptError as err:
-                    await self._async_reply(
-                        sender, f"{err} Adding without dates."
-                    )
-                    dates = {}
-                for number, iso in dates.items():
-                    line_index = perishables[number - 1][0]
-                    session["lines"][line_index]["expiration_date"] = iso
-            await self._async_finish_receipt(sender, session)
-            return True
-
-        return False
-
-    async def _async_drop_lines(
-        self, sender: str, session: dict, drop: list[int]
-    ) -> None:
-        """Remove the named lines and re-show the receipt for confirmation."""
-        from . import receipts
-
-        if not drop:
-            await self._async_reply(
-                sender,
-                f"That receipt only has {len(session['lines'])} line(s) - "
-                "reply with a number from the list, or YES to add them all.",
-            )
-            return
-
-        removed = set(drop)
-        session["lines"] = [
-            line for index, line in enumerate(session["lines"])
-            if index not in removed
-        ]
-        _record(self.hass, "receipt_lines_dropped", str(len(removed)))
-        if not session["lines"]:
-            receipts.session_clear(self.hass, sender)
-            await self._async_reply(
-                sender, "That was every line - nothing was added."
-            )
-            return
-        await self._async_reply(
-            sender,
-            f"Dropped {len(removed)} line(s).\n\n"
-            + receipts.format_preview(session["lines"]),
-        )
-
-    async def _async_finish_receipt(self, sender: str, session: dict) -> None:
-        from . import receipts
-
-        try:
-            result = await receipts.async_commit(self.hass, session["lines"])
-        except receipts.ReceiptError as err:
-            _record(self.hass, "receipt_failed", str(err)[:80])
-            await self._async_reply(sender, str(err))
-            return
-        finally:
-            receipts.session_clear(self.hass, sender)
-
-        _record(self.hass, "receipt_committed", f"{result['count']} items")
-        summary = [f"Added {result['count']} item(s) to the inventory."]
-        if result["products_created"]:
-            summary.append(f"{result['products_created']} new product(s) created.")
-        if result["fulfilled_shopping_ids"]:
-            summary.append(
-                f"{len(result['fulfilled_shopping_ids'])} shopping list "
-                "item(s) marked as bought."
-            )
-        await self._async_reply(sender, " ".join(summary))
-
-    def _sender_allowed(self, sender: str) -> bool:
-        allowed = _allowed_numbers(self._options)
-        if not allowed:
-            # An empty allowlist would let anyone who learns the number drive
-            # the inventory - refuse instead.
-            _LOGGER.error("No WhatsApp allowed senders configured; ignoring message")
-            return False
-        return _digits(sender) in allowed
-
-    async def _async_converse(self, text: str, sender: str) -> str | None:
-        """Hand the text to the configured conversation agent."""
-        agent_id = self._options.get(CONF_WA_AGENT_ID)
-        # One conversation per sender keeps follow-ups ("make it 3 instead")
-        # in context across messages.
-        conversation_id = f"{DOMAIN}_wa_{_digits(sender)}"
-        # Run as the sender's Home Assistant user (when mapped in the options),
-        # so tools such as reminders know who is asking.
-        reminders = self.hass.data.get(DOMAIN, {}).get("reminders")
-        user_id = reminders.user_for_number(sender) if reminders else None
-        try:
-            result = await conversation.async_converse(
-                self.hass,
-                text=text,
-                conversation_id=conversation_id,
-                context=Context(user_id=user_id) if user_id else None,
-                language=self.hass.config.language,
-                agent_id=agent_id,
-            )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.exception("Conversation agent failed")
-            return f"Sorry, I couldn't process that ({err})."
-
-        try:
-            return result.response.speech["plain"]["speech"]
-        except (AttributeError, KeyError, TypeError):
-            return "Done."
-
-    async def _async_reply(self, to: str, body: str) -> None:
-        client = self._client
-        if client is None:
-            _LOGGER.error("Cannot reply: WhatsApp client not set up")
-            return
-        ok = await client.async_send_text(to, body)
-        _trace(self._options, "reply to %s %s", _mask(to),
-               "sent" if ok else f"FAILED: {client.last_error}")
-        _record(
-            self.hass,
-            "reply_sent" if ok else "reply_failed",
-            None if ok else client.last_error,
-        )
-
+        await self.async_read_receipt(sender, mime, fetch)
 
 def _collapse_whitespace(text: str) -> str:
     """Flatten whitespace so one item stays on one line."""
