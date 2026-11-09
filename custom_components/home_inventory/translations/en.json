@@ -17,7 +17,7 @@
         "description": "Control the inventory, send receipt photos and get expiry alerts over WhatsApp, through a WAHA (WhatsApp HTTP API) server such as the WAHA add-on.\n\nIn WAHA, set the webhook URL to:\n{webhook}\nwith the \"message\" event. If you set an HMAC key in WAHA, enter the same key below.\n\nLeave the key fields blank to keep the currently stored values.\n\nTelegram (optional) works through Home Assistant's Telegram bot integration: set that up first (with these chats allowed), then enable Telegram here and list the chat ids that may use the inventory. Other chats of the same bot are left alone.",
         "data": {
           "whatsapp_enabled": "Enable WhatsApp",
-          "waha_url": "WAHA URL, e.g. http://homeassistant.local:3000",
+          "waha_url": "WAHA URL - the address of your WAHA server, including the port (e.g. port 3000)",
           "waha_api_key": "WAHA API key",
           "waha_session": "WAHA session name",
           "waha_webhook_hmac_key": "Webhook HMAC key (optional, must match WAHA)",
@@ -38,7 +38,7 @@
     },
     "error": {
       "ai_task_required": "Receipt scanning needs an AI Task entity — pick one above, or turn receipt scanning off. If the list is empty, add an AI Task entry to your AI integration (Settings → Devices & Services → Google Generative AI → Add entry) and reopen this form.",
-      "invalid_url": "Enter the full WAHA address, starting with http:// or https://",
+      "invalid_url": "Enter the full WAHA address, including the http or https scheme at the start",
       "invalid_telegram_chats": "Use chat ids (numbers, negative for groups), each optionally followed by =person.name, separated by commas",
       "telegram_chats_required": "List at least one Telegram chat id, or turn Telegram off"
     }
