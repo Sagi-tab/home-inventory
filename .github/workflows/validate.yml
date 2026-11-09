@@ -1,0 +1,57 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+# Read-only token: these jobs only check the code
+permissions:
+  contents: read
+
+# Third-party actions are pinned to commit SHAs so a moved tag/branch can't
+# inject code into this pipeline. Update the SHAs deliberately.
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: home-assistant/actions/hassfest@86d4564712fa02543c808e3a693dd04f9d3f8361 # master
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa # main
+        with:
+          category: integration
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - run: pip install pytest-homeassistant-custom-component
+      - name: Install requirements of the Home Assistant components the integration imports
+        run: |
+          reqs=$(python - <<'PY'
+          import json, pathlib, homeassistant.components as c
+          base = pathlib.Path(c.__path__[0])
+          out = []
+          for name in ("conversation", "webhook", "telegram_bot", "ai_task", "media_source"):
+              try:
+                  out += json.loads((base / name / "manifest.json").read_text()).get("requirements", [])
+              except FileNotFoundError:
+                  pass
+          print(" ".join(dict.fromkeys(out)))
+          PY
+          )
+          pip install $reqs
+      - run: pytest -q

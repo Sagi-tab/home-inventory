@@ -1,13 +1,13 @@
 {
   "domain": "home_inventory",
   "name": "Home Inventory",
-  "version": "0.10.0",
-  "documentation": "https://github.com/Sagi-tab/home-inventory",
-  "issue_tracker": "https://github.com/Sagi-tab/home-inventory/issues",
-  "dependencies": ["http", "frontend", "webhook"],
   "codeowners": ["@Sagi-tab"],
-  "requirements": ["aiohttp>=3.8.0"],
-  "iot_class": "local_polling",
   "config_flow": true,
-  "integration_type": "service"
+  "dependencies": ["http", "frontend", "webhook"],
+  "documentation": "https://github.com/Sagi-tab/home-inventory",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Sagi-tab/home-inventory/issues",
+  "requirements": ["aiohttp>=3.8.0"],
+  "version": "0.10.0"
 }
