@@ -37,7 +37,6 @@ from .const import (
     RECEIPT_MIN_MATCH_SCORE,
     RECEIPT_SESSION_TTL,
     RECEIPT_STRONG_MATCH_SCORE,
-    WHATSAPP_MEDIA_URL,
     WHATSAPP_TIMEOUT,
 )
 from .lookup import normalize_category
@@ -122,54 +121,41 @@ class ReceiptError(HomeAssistantError):
 # ---------- media ----------
 
 
-async def async_download_media(hass: HomeAssistant, options: dict, media_id: str):
-    """Fetch WhatsApp media. Returns (bytes, mime_type).
+async def async_download_media(
+    hass: HomeAssistant, url: str, headers: dict[str, str], mime: str
+):
+    """Fetch an attachment WAHA has saved. Returns (bytes, mime_type).
 
-    Two hops: the media id resolves to a URL that lives about five minutes and
-    still requires the bearer token - fetching it unauthenticated returns 401.
+    ``url`` points at WAHA's file store and needs the WAHA API key, carried in
+    ``headers``.
     """
-    from .const import CONF_WA_ACCESS_TOKEN
-
-    token = options.get(CONF_WA_ACCESS_TOKEN)
-    if not token:
-        raise ReceiptError("WhatsApp access token is not configured.")
+    if mime and mime not in RECEIPT_ACCEPTED_MIME:
+        raise ReceiptError(f"I can't read {mime} files - send a photo or PDF.")
 
     session = async_get_clientsession(hass)
-    headers = {"Authorization": f"Bearer {token}"}
     timeout = aiohttp.ClientTimeout(total=WHATSAPP_TIMEOUT)
 
     try:
-        async with session.get(
-            WHATSAPP_MEDIA_URL.format(media_id=media_id),
-            headers=headers,
-            timeout=timeout,
-        ) as resp:
-            if resp.status >= 400:
-                raise ReceiptError(
-                    f"Could not look up the image ({resp.status})."
-                )
-            meta = await resp.json()
-
-        url = meta.get("url")
-        mime = (meta.get("mime_type") or "").split(";")[0].strip()
-        if not url:
-            raise ReceiptError("WhatsApp did not return a download URL.")
-        if mime and mime not in RECEIPT_ACCEPTED_MIME:
-            raise ReceiptError(f"I can't read {mime} files - send a photo or PDF.")
-
         async with session.get(url, headers=headers, timeout=timeout) as resp:
             if resp.status >= 400:
                 raise ReceiptError(f"Could not download the image ({resp.status}).")
             declared = resp.content_length
             if declared and declared > RECEIPT_MAX_BYTES:
                 raise ReceiptError("That image is too large.")
-            data = await resp.content.read(RECEIPT_MAX_BYTES + 1)
-            if len(data) > RECEIPT_MAX_BYTES:
-                raise ReceiptError("That image is too large.")
+            # Read to the end: content.read(n) returns only what has arrived
+            # so far, which handed the model a truncated image that it
+            # rejects as an invalid argument.
+            data = bytearray()
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                data.extend(chunk)
+                if len(data) > RECEIPT_MAX_BYTES:
+                    raise ReceiptError("That image is too large.")
+            if declared and len(data) < declared:
+                raise ReceiptError("The image download was cut short - please send it again.")
     except (aiohttp.ClientError, asyncio.TimeoutError) as err:
         raise ReceiptError(f"Download failed: {err}") from err
 
-    return data, mime or "image/jpeg"
+    return bytes(data), mime or "image/jpeg"
 
 
 def _media_dir(hass: HomeAssistant) -> Path:
@@ -365,16 +351,15 @@ def _failure_message(err: Exception, mime: str | None) -> str:
             "I couldn't read that PDF - the AI model rejected it. Send a photo "
             "or screenshot of the receipt instead, which works reliably."
         )
-    # Same rejection on an image the provider is perfectly able to read, so
-    # the request itself is malformed rather than the receipt. In practice
-    # that means the AI Task entity's settings: a thinking level or budget
-    # the chosen model does not accept, or a model that takes no image input.
+    # The same rejection comes from a damaged image and from AI Task settings
+    # the model cannot honour (a thinking level or budget it does not
+    # support, or a model without image input). Name both rather than
+    # guessing which one it was.
     return (
-        "The AI model rejected the request itself, so this isn't about the "
-        "receipt. Check the AI Task entity's settings - a thinking level or "
-        "budget the model doesn't support, or a model that can't read "
-        "images, both fail this way. Undo the most recent change there and "
-        "try again."
+        "The AI model rejected the request. Please send the photo again. If "
+        "it keeps failing, check the AI Task entity's settings - a thinking "
+        "level or budget the model doesn't support, or a model that can't "
+        "read images, fails this way."
     )
 
 

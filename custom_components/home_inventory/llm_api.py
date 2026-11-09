@@ -25,11 +25,18 @@ from .const import (
     DOMAIN,
     LLM_API_ID,
     LLM_API_NAME,
-    LOCATIONS,
     SERVICE_ADD_ITEM,
     SERVICE_ADD_TO_SHOPPING,
     SERVICE_REMOVE_ITEM,
     SERVICE_SET_THRESHOLD,
+)
+from .reminders import (
+    KIND_HOME,
+    KIND_POINT,
+    KIND_TIME,
+    STATUS_PENDING_LOCATION,
+    ReminderManager,
+    async_coords_from_maps_url,
 )
 from .storage import Database
 
@@ -44,10 +51,26 @@ Guidelines:
 name to a product_id before removing or changing an item.
 - Expiration dates are ISO YYYY-MM-DD. Convert relative dates ("Friday", \
 "in two weeks") using today's date, given below.
-- Locations: {locations}.
+- Items are not tracked by storage location. When asked about a place \
+("what's in the fridge?", "what's in the pantry?"), list the inventory - \
+narrowed to the categories that fit, if any - rather than saying it is empty.
 - Categories: {categories}.
 - Keep replies short and plain-text: they are delivered over WhatsApp, which \
 has no markdown rendering.
+
+Reminders ("remind me...", "תזכיר לי..."): always use create_reminder.
+- Home ("home", "בית", "בבית", "הביתה", "לבית") -> trigger "home".
+- No place and no time given -> trigger "home".
+- A date or time -> trigger "time", with "due" as an ISO 8601 local date-time.
+- Any other place -> trigger "place" with place_name. Pass latitude/longitude \
+or maps_url only if the user shared them; never guess coordinates for a \
+named place. When the tool returns needs_location, ask the user to share the \
+place with WhatsApp's location option (📎 -> Location) or a Google Maps link.
+- A message "[shared location: <lat>, <lon>]" is a location the user sent; \
+use it for a "place" reminder they ask for with it.
+- Location reminders fire once the user has been at the place for 5 minutes; \
+one created while they are already there waits for their next arrival.
+- "text" is the reminder as the user should receive it, short, in their language.
 """
 
 
@@ -80,7 +103,6 @@ class AddItemTool(_InventoryTool):
             vol.Optional("quantity"): vol.Coerce(float),
             vol.Optional("unit"): str,
             vol.Optional("category"): vol.In(CATEGORIES),
-            vol.Optional("location"): vol.In(LOCATIONS),
             vol.Optional("expiration_date"): str,
             vol.Optional("notes"): str,
             vol.Optional("target"): vol.In(["inventory", "shopping"]),
@@ -111,7 +133,6 @@ class RemoveItemTool(_InventoryTool):
         {
             vol.Required("product_id"): vol.Coerce(int),
             vol.Optional("quantity"): vol.Coerce(float),
-            vol.Optional("location"): vol.In(LOCATIONS),
             vol.Optional("add_to_shopping_list"): bool,
         }
     )
@@ -185,8 +206,8 @@ class SearchInventoryTool(_InventoryTool):
 
     name = "search_inventory"
     description = (
-        "Search the inventory by product name. Returns product_id, quantity, "
-        "location and expiration for each match. Use this to resolve a name to "
+        "Search the inventory by product name. Returns product_id, quantity "
+        "and expiration for each match. Use this to resolve a name to "
         "a product_id, or to answer 'do we have X?'."
     )
     parameters = vol.Schema({vol.Required("query"): str})
@@ -203,7 +224,6 @@ class SearchInventoryTool(_InventoryTool):
                 "name_he": r.get("product_name_he"),
                 "quantity": r.get("quantity"),
                 "unit": r.get("unit"),
-                "location": r.get("location"),
                 "expiration_date": r.get("expiration_date"),
                 "category": r.get("category"),
             }
@@ -215,27 +235,21 @@ class SearchInventoryTool(_InventoryTool):
 
 
 class ListInventoryTool(_InventoryTool):
-    """List stock, optionally filtered by location or category."""
+    """List stock, optionally filtered by category."""
 
     name = "list_inventory"
     description = (
         "List what is currently in the inventory, optionally filtered by "
-        "location or category. Use for 'what's in the fridge?'."
+        "category. Use for 'what do we have?' and for questions about a place "
+        "such as the fridge - items are not tracked by location."
     )
-    parameters = vol.Schema(
-        {
-            vol.Optional("location"): vol.In(LOCATIONS),
-            vol.Optional("category"): vol.In(CATEGORIES),
-        }
-    )
+    parameters = vol.Schema({vol.Optional("category"): vol.In(CATEGORIES)})
 
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
     ) -> dict:
         args = tool_input.tool_args
         rows = await self._db(hass).list_inventory()
-        if location := args.get("location"):
-            rows = [r for r in rows if r.get("location") == location]
         if category := args.get("category"):
             rows = [r for r in rows if r.get("category") == category]
         items = [
@@ -244,7 +258,7 @@ class ListInventoryTool(_InventoryTool):
                 "name": r.get("product_name"),
                 "quantity": r.get("quantity"),
                 "unit": r.get("unit"),
-                "location": r.get("location"),
+                "category": r.get("category"),
                 "expiration_date": r.get("expiration_date"),
             }
             for r in rows
@@ -270,7 +284,6 @@ class ExpiringItemsTool(_InventoryTool):
                 "name": r.get("product_name"),
                 "quantity": r.get("quantity"),
                 "expiration_date": r.get("expiration_date"),
-                "location": r.get("location"),
             }
             for r in rows
         ]
@@ -323,6 +336,133 @@ class LowStockTool(_InventoryTool):
         return {"count": len(items), "items": items}
 
 
+class _ReminderTool(llm.Tool):
+    """Base for reminder tools: they act for the person who is talking."""
+
+    @staticmethod
+    def _manager(hass: HomeAssistant) -> ReminderManager | None:
+        return hass.data.get(DOMAIN, {}).get("reminders")
+
+    def _person(self, hass: HomeAssistant, llm_context: llm.LLMContext) -> str | None:
+        manager = self._manager(hass)
+        context = llm_context.context
+        if manager is None or context is None:
+            return None
+        return manager.person_for_user(context.user_id)
+
+    @staticmethod
+    def _unknown_user() -> dict:
+        return {
+            "success": False,
+            "error": "Reminders are only available to the people mapped in the "
+            "Home Inventory WhatsApp options; this user is not one of them.",
+        }
+
+
+class CreateReminderTool(_ReminderTool):
+    """Create a reminder for the user who is talking."""
+
+    name = "create_reminder"
+    description = (
+        "Create a reminder for the user, delivered to them on WhatsApp: when they "
+        "get home, when they get to another place, or at a time."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("text"): str,
+            vol.Required("trigger"): vol.In(["home", "place", "time"]),
+            vol.Optional("place_name"): str,
+            vol.Optional("latitude"): vol.Coerce(float),
+            vol.Optional("longitude"): vol.Coerce(float),
+            vol.Optional("maps_url"): str,
+            vol.Optional("due"): str,
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
+    ) -> dict:
+        manager = self._manager(hass)
+        person = self._person(hass, llm_context)
+        if manager is None or person is None:
+            return self._unknown_user()
+        args = tool_input.tool_args
+        text = str(args["text"]).strip()
+        trigger = args["trigger"]
+
+        if trigger == "time":
+            due = dt_util.parse_datetime(str(args.get("due") or ""))
+            if due is None:
+                return {"success": False, "error": "due must be an ISO 8601 date-time"}
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=dt_util.get_default_time_zone())
+            if due <= dt_util.now():
+                return {"success": False, "error": "due is in the past"}
+            reminder = await manager.async_create(person, text, KIND_TIME, due=due)
+            return {"success": True, "reminder": manager.describe(reminder)}
+
+        if trigger == "home":
+            reminder = await manager.async_create(person, text, KIND_HOME)
+            return {"success": True, "reminder": manager.describe(reminder)}
+
+        lat, lon = args.get("latitude"), args.get("longitude")
+        if (lat is None or lon is None) and args.get("maps_url"):
+            if coords := await async_coords_from_maps_url(hass, str(args["maps_url"])):
+                lat, lon = coords
+        reminder = await manager.async_create(
+            person,
+            text,
+            KIND_POINT,
+            latitude=lat,
+            longitude=lon,
+            place=args.get("place_name"),
+        )
+        result = {"success": True, "reminder": manager.describe(reminder)}
+        if reminder["status"] == STATUS_PENDING_LOCATION:
+            result["needs_location"] = True
+            result["next_step"] = (
+                "Ask the user to share this place with WhatsApp's location option "
+                "or a Google Maps link. The next location they send is used for it."
+            )
+        return result
+
+
+class ListRemindersTool(_ReminderTool):
+    """List the user's open reminders."""
+
+    name = "list_reminders"
+    description = "List the user's open reminders, with their ids."
+    parameters = vol.Schema({})
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
+    ) -> dict:
+        manager = self._manager(hass)
+        person = self._person(hass, llm_context)
+        if manager is None or person is None:
+            return self._unknown_user()
+        items = [manager.describe(r) for r in manager.for_person(person)]
+        return {"count": len(items), "reminders": items}
+
+
+class CancelReminderTool(_ReminderTool):
+    """Cancel one of the user's reminders."""
+
+    name = "cancel_reminder"
+    description = "Cancel one of the user's reminders by id (from list_reminders)."
+    parameters = vol.Schema({vol.Required("reminder_id"): str})
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context: llm.LLMContext
+    ) -> dict:
+        manager = self._manager(hass)
+        person = self._person(hass, llm_context)
+        if manager is None or person is None:
+            return self._unknown_user()
+        ok = await manager.async_cancel(person, str(tool_input.tool_args["reminder_id"]))
+        return {"success": ok}
+
+
 TOOLS: list[type[llm.Tool]] = [
     AddItemTool,
     RemoveItemTool,
@@ -333,6 +473,9 @@ TOOLS: list[type[llm.Tool]] = [
     ExpiringItemsTool,
     ShoppingListTool,
     LowStockTool,
+    CreateReminderTool,
+    ListRemindersTool,
+    CancelReminderTool,
 ]
 
 
@@ -345,12 +488,11 @@ class HomeInventoryLLMAPI(llm.API):
     async def async_get_api_instance(
         self, llm_context: llm.LLMContext
     ) -> llm.APIInstance:
-        prompt = API_PROMPT.format(
-            locations=", ".join(LOCATIONS),
-            categories=", ".join(CATEGORIES),
-        )
+        prompt = API_PROMPT.format(categories=", ".join(CATEGORIES))
         # The model needs today's date to resolve "expires Friday".
         prompt += f"\nToday's date is {dt_util.now().date().isoformat()}."
+        # ...and the time and timezone to resolve "remind me at 18:00".
+        prompt += f" The current local time is {dt_util.now().isoformat(timespec='minutes')}."
         return llm.APIInstance(
             api=self,
             api_prompt=prompt,

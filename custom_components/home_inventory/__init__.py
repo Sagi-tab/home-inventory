@@ -10,21 +10,57 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.loader import async_get_integration
 
-from .const import CARD_FILENAME, DOMAIN, FRONTEND_URL, PLATFORMS
+from .config_flow import new_webhook_id
+from .const import (
+    CARD_FILENAME,
+    CONF_REMINDER_RADIUS,
+    CONF_WA_PEOPLE,
+    CONF_WAHA_WEBHOOK_ID,
+    DEFAULT_REMINDER_RADIUS,
+    DOMAIN,
+    FRONTEND_URL,
+    LEGACY_META_OPTIONS,
+    PLATFORMS,
+)
 from .http_api import async_register_views
 from .intents import async_register_intents
 from .llm_api import async_register_llm_api
 from .lookup import BarcodeLookup
+from .reminders import ReminderManager, parse_people
 from .seed_data import seed_if_empty
 from .services import async_register_services
 from .storage import Database
-from .whatsapp import async_setup_whatsapp
+from .whatsapp import async_setup_whatsapp, async_unload_whatsapp
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up via YAML is not supported; use the UI flow."""
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate older config entries.
+
+    v1 -> v2 (0.8.0): WhatsApp moved from the Meta Cloud API to WAHA. The Meta
+    tokens are dropped rather than kept around unused, and the entry gets the
+    random id that names its WAHA webhook. Shared settings (allowed senders,
+    agent, alert time and days, receipts) carry over unchanged.
+    """
+    if entry.version == 1:
+        options = {
+            k: v for k, v in entry.options.items() if k not in LEGACY_META_OPTIONS
+        }
+        data = {k: v for k, v in entry.data.items() if k not in LEGACY_META_OPTIONS}
+        data.setdefault(CONF_WAHA_WEBHOOK_ID, new_webhook_id())
+        hass.config_entries.async_update_entry(
+            entry, data=data, options=options, version=2
+        )
+        _LOGGER.info(
+            "Migrated Home Inventory to WAHA: Meta WhatsApp settings removed; "
+            "set the WAHA URL in the integration options"
+        )
     return True
 
 
@@ -40,6 +76,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN]["db"] = db
     hass.data[DOMAIN]["lookup"] = lookup
     hass.data[DOMAIN]["entry"] = entry
+
+    reminders = ReminderManager(hass)
+    _configure_reminders(reminders, entry)
+    await reminders.async_load()
+    hass.data[DOMAIN]["reminders"] = reminders
 
     async_register_services(hass, db, lookup)
     async_register_views(hass)
@@ -144,15 +185,26 @@ async def _async_register_lovelace_resource(
         )
 
 
+def _configure_reminders(reminders: ReminderManager, entry: ConfigEntry) -> None:
+    options = {**entry.data, **entry.options}
+    reminders.async_configure(
+        parse_people(options.get(CONF_WA_PEOPLE)),
+        options.get(CONF_REMINDER_RADIUS, DEFAULT_REMINDER_RADIUS),
+    )
+
+
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply changed WhatsApp options without restarting Home Assistant."""
     async_setup_whatsapp(hass, entry)
+    if reminders := hass.data.get(DOMAIN, {}).get("reminders"):
+        _configure_reminders(reminders, entry)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
-        if unsub := hass.data.get(DOMAIN, {}).get("wa_unsub_timer"):
-            unsub()
+        if reminders := hass.data.get(DOMAIN, {}).get("reminders"):
+            reminders.async_unload()
+        async_unload_whatsapp(hass)
         hass.data.pop(DOMAIN, None)
     return unloaded
