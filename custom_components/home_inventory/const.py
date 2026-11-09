@@ -63,6 +63,15 @@ CONF_RECEIPTS_ENABLED = "receipts_enabled"
 CONF_AI_TASK_ENTITY = "ai_task_entity"
 # "<number>=person.<id>, ..." - who each WhatsApp sender is, for reminders.
 CONF_WA_PEOPLE = "whatsapp_people"
+
+# ---------- Telegram (optional, through Home Assistant's telegram_bot) ----------
+CONF_TG_ENABLED = "telegram_enabled"
+# "<chat id>[=person.<id>], ..." - chats allowed to talk to the inventory (and
+# receive the digest), optionally mapped to a person for reminders.
+CONF_TG_CHATS = "telegram_chats"
+# Which telegram_bot config entry to use when more than one bot is set up.
+CONF_TG_BOT = "telegram_bot_entry"
+TELEGRAM_DOMAIN = "telegram_bot"
 CONF_REMINDER_RADIUS = "reminder_radius"
 
 # Meta Cloud API settings from before 0.8.0, dropped by the entry migration.

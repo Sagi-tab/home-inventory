@@ -14,6 +14,7 @@ from .config_flow import new_webhook_id
 from .const import (
     CARD_FILENAME,
     CONF_REMINDER_RADIUS,
+    CONF_TG_CHATS,
     CONF_WA_PEOPLE,
     CONF_WAHA_WEBHOOK_ID,
     DEFAULT_REMINDER_RADIUS,
@@ -30,6 +31,7 @@ from .reminders import ReminderManager, parse_people
 from .seed_data import seed_if_empty
 from .services import async_register_services
 from .storage import Database
+from .telegram import async_setup_telegram, async_unload_telegram, parse_chats
 from .whatsapp import async_setup_whatsapp, async_unload_whatsapp
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,8 +89,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async_register_intents(hass)
     async_register_llm_api(hass)
     async_setup_whatsapp(hass, entry)
+    async_setup_telegram(hass, entry)
 
-    # Re-apply WhatsApp settings (and reschedule the digest) on options change.
+    # Re-apply WhatsApp/Telegram settings (and reschedule the digest) on options change.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     # Register the frontend static path first so the card JS is reachable.
@@ -190,12 +193,14 @@ def _configure_reminders(reminders: ReminderManager, entry: ConfigEntry) -> None
     reminders.async_configure(
         parse_people(options.get(CONF_WA_PEOPLE)),
         options.get(CONF_REMINDER_RADIUS, DEFAULT_REMINDER_RADIUS),
+        parse_chats(options.get(CONF_TG_CHATS)),
     )
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Apply changed WhatsApp options without restarting Home Assistant."""
+    """Apply changed WhatsApp/Telegram options without restarting Home Assistant."""
     async_setup_whatsapp(hass, entry)
+    async_setup_telegram(hass, entry)
     if reminders := hass.data.get(DOMAIN, {}).get("reminders"):
         _configure_reminders(reminders, entry)
 
@@ -206,5 +211,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if reminders := hass.data.get(DOMAIN, {}).get("reminders"):
             reminders.async_unload()
         async_unload_whatsapp(hass)
+        async_unload_telegram(hass)
         hass.data.pop(DOMAIN, None)
     return unloaded

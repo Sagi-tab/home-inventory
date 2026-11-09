@@ -589,7 +589,26 @@ def webhook_url(hass: HomeAssistant, options: dict) -> str:
 
 
 async def async_send_expiry_digest(hass: HomeAssistant) -> dict[str, Any]:
-    """Send the expiring-items digest now.
+    """Send the expiring-items digest on every enabled channel.
+
+    Without Telegram the result is exactly the WhatsApp result. With Telegram
+    enabled it becomes ``{"sent": <any channel>, "whatsapp": ..., "telegram": ...}``.
+    """
+    from .telegram import async_send_digest, telegram_enabled
+
+    whatsapp_result = await _async_whatsapp_digest(hass)
+    if not telegram_enabled(hass.data.get(DOMAIN, {}).get("wa_options", {})):
+        return whatsapp_result
+    telegram_result = await async_send_digest(hass)
+    return {
+        "sent": bool(whatsapp_result.get("sent") or telegram_result.get("sent")),
+        "whatsapp": whatsapp_result,
+        "telegram": telegram_result,
+    }
+
+
+async def _async_whatsapp_digest(hass: HomeAssistant) -> dict[str, Any]:
+    """Send the expiring-items digest over WhatsApp now.
 
     Returns a result dict rather than a bare boolean: "nothing was sent" has
     several very different causes (not configured, nothing expiring, WAHA
@@ -650,6 +669,8 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
     Reports only whether each secret is present, never its value, so the
     output is safe to paste when asking for help.
     """
+    from .telegram import telegram_diagnostics
+
     data = hass.data.get(DOMAIN, {})
     options: dict = data.get("wa_options", {})
     client: WahaClient | None = data.get("wa_client")
@@ -712,6 +733,8 @@ async def async_whatsapp_diagnostics(hass: HomeAssistant) -> dict[str, Any]:
         "last_ai_reply": stats.get("last_ai_reply") or "no AI reply since restart",
         "last_ai_reply_at": stats.get("last_ai_reply_at"),
         "last_ai_reply_truncated": bool(stats.get("last_ai_reply_truncated")),
+        # The optional Telegram channel (counts and flags only, no chat ids).
+        "telegram": telegram_diagnostics(hass),
     }
 
 
@@ -745,6 +768,11 @@ def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if unsub := hass.data[DOMAIN].pop("wa_unsub_timer", None):
         unsub()
 
+    from .telegram import telegram_enabled
+
+    # The daily digest goes out on every enabled channel.
+    if options.get(CONF_WA_ENABLED) or telegram_enabled(options):
+        _schedule_digest(hass, options)
     if not options.get(CONF_WA_ENABLED):
         return
 
@@ -760,6 +788,9 @@ def async_setup_whatsapp(hass: HomeAssistant, entry: ConfigEntry) -> None:
             ", ".join(missing),
         )
 
+
+@callback
+def _schedule_digest(hass: HomeAssistant, options: dict) -> None:
     alert_at = _parse_time(options.get(CONF_WA_ALERT_TIME) or DEFAULT_WA_ALERT_TIME)
 
     async def _scheduled(_now) -> None:

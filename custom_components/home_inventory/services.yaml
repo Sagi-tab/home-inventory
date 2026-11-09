@@ -370,12 +370,14 @@ rename_product:
           options: [fridge, freezer, pantry, bathroom, cleaning_cabinet, other]
 
 send_expiry_alert:
-  name: Send Expiry Alert (WhatsApp)
+  name: Send Expiry Alert
   description: >
-    Send the expiring-items digest over WhatsApp now, to every allowed sender.
-    Returns a result with 'sent' plus a 'reason' explaining why nothing was
-    sent (not_configured, no_expiring_items, no_recipients, send_failed), the
-    digest 'preview', and WAHA's error text on failure.
+    Send the expiring-items digest now, over WhatsApp to every allowed sender
+    and, when Telegram is enabled, to every listed Telegram chat. Returns a
+    result with 'sent' plus a 'reason' explaining why nothing was sent
+    (not_configured, no_expiring_items, no_recipients, send_failed), the
+    digest 'preview', and WAHA's error text on failure. With Telegram enabled
+    the result is split into 'whatsapp' and 'telegram' parts.
 
 process_receipt:
   name: Process Receipt
@@ -402,8 +404,8 @@ whatsapp_diagnostics:
     Report the resolved WhatsApp (WAHA) setup: which settings are present, the
     live WAHA session status, the webhook URL to configure in WAHA, the
     conversation agent in use, recent inbound activity and the last send
-    error. Secrets are reported as present/absent only, so the output is safe
-    to share.
+    error, plus a 'telegram' section for the optional Telegram channel.
+    Secrets and chat ids are never included, so the output is safe to share.
 
 update_shopping_quantity:
   name: Update shopping item quantity

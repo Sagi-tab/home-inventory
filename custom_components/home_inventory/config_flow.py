@@ -16,6 +16,9 @@ from .const import (
     CONF_AI_TASK_ENTITY,
     CONF_RECEIPTS_ENABLED,
     CONF_REMINDER_RADIUS,
+    CONF_TG_BOT,
+    CONF_TG_CHATS,
+    CONF_TG_ENABLED,
     CONF_WA_AGENT_ID,
     CONF_WA_ALERT_DAYS,
     CONF_WA_ALERT_TIME,
@@ -33,7 +36,9 @@ from .const import (
     DEFAULT_WA_ALERT_TIME,
     DEFAULT_WAHA_SESSION,
     DOMAIN,
+    TELEGRAM_DOMAIN,
 )
+from .telegram import invalid_chat_parts, parse_chats
 
 
 def validate_options(user_input: dict) -> dict[str, str]:
@@ -53,6 +58,11 @@ def validate_options(user_input: dict) -> dict[str, str]:
         user_input.get(CONF_AI_TASK_ENTITY) or ""
     ).strip():
         errors[CONF_AI_TASK_ENTITY] = "ai_task_required"
+    chats = user_input.get(CONF_TG_CHATS)
+    if invalid_chat_parts(chats):
+        errors[CONF_TG_CHATS] = "invalid_telegram_chats"
+    elif user_input.get(CONF_TG_ENABLED) and not parse_chats(chats):
+        errors[CONF_TG_CHATS] = "telegram_chats_required"
     return errors
 
 
@@ -78,7 +88,7 @@ class HomeInventoryConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class HomeInventoryOptionsFlow(OptionsFlow):
-    """Configure the WhatsApp bridge (WAHA)."""
+    """Configure messaging: WhatsApp (WAHA) and, optionally, Telegram."""
 
     async def async_step_init(self, user_input=None):
         errors: dict[str, str] = {}
@@ -91,6 +101,8 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                 for key in (CONF_WAHA_API_KEY, CONF_WAHA_HMAC_KEY):
                     if not user_input.get(key) and current.get(key):
                         user_input[key] = current[key]
+                if not user_input.get(CONF_TG_BOT):
+                    user_input.pop(CONF_TG_BOT, None)
                 return self.async_create_entry(title="", data=user_input)
 
         # On a validation error redisplay what was typed rather than the stored
@@ -130,6 +142,23 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                     CONF_WA_PEOPLE,
                     default=options.get(CONF_WA_PEOPLE, ""),
                 ): selector.TextSelector(),
+                # Telegram (optional): uses Home Assistant's Telegram bot
+                # integration, so there is no token to enter here.
+                vol.Optional(
+                    CONF_TG_ENABLED,
+                    default=options.get(CONF_TG_ENABLED, False),
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_TG_CHATS,
+                    default=options.get(CONF_TG_CHATS, ""),
+                ): selector.TextSelector(),
+                # suggested_value (not default) so the choice can be cleared
+                vol.Optional(
+                    CONF_TG_BOT,
+                    description={"suggested_value": options.get(CONF_TG_BOT)},
+                ): selector.ConfigEntrySelector(
+                    selector.ConfigEntrySelectorConfig(integration=TELEGRAM_DOMAIN)
+                ),
                 vol.Optional(
                     CONF_REMINDER_RADIUS,
                     default=options.get(CONF_REMINDER_RADIUS, DEFAULT_REMINDER_RADIUS),
@@ -144,7 +173,10 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(
                     CONF_WA_AGENT_ID,
-                    default=options.get(CONF_WA_AGENT_ID, ""),
+                    # suggested_value, not default="": an empty entity id
+                    # fails validation, which made the form unsavable
+                    # without picking one.
+                    description={"suggested_value": options.get(CONF_WA_AGENT_ID) or None},
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="conversation")
                 ),
@@ -170,7 +202,10 @@ class HomeInventoryOptionsFlow(OptionsFlow):
                 ): selector.BooleanSelector(),
                 vol.Optional(
                     CONF_AI_TASK_ENTITY,
-                    default=options.get(CONF_AI_TASK_ENTITY, ""),
+                    # suggested_value, not default="": an empty entity id
+                    # fails validation, which made the form unsavable
+                    # without picking one.
+                    description={"suggested_value": options.get(CONF_AI_TASK_ENTITY) or None},
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="ai_task")
                 ),

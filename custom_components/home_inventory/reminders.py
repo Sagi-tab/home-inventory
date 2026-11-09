@@ -120,7 +120,8 @@ class ReminderManager:
         self._store: Store = Store(hass, 1, REMINDERS_STORAGE_KEY)
         self._reminders: dict[str, dict[str, Any]] = {}
         self._next_id = 1
-        self._people: dict[str, str] = {}
+        self._people: dict[str, str] = {}  # WhatsApp number -> person
+        self._tg_people: dict[str, str] = {}  # Telegram chat id -> person
         self._radius = DEFAULT_REMINDER_RADIUS
         self._dwell: dict[str, CALLBACK_TYPE] = {}
         self._timers: dict[str, CALLBACK_TYPE] = {}
@@ -149,8 +150,16 @@ class ReminderManager:
         self._timers.clear()
 
     @callback
-    def async_configure(self, people: dict[str, str], radius: float) -> None:
+    def async_configure(
+        self,
+        people: dict[str, str],
+        radius: float,
+        telegram_chats: dict[str, str | None] | None = None,
+    ) -> None:
         self._people = people
+        self._tg_people = {
+            chat: person for chat, person in (telegram_chats or {}).items() if person
+        }
         self._radius = float(radius or DEFAULT_REMINDER_RADIUS)
 
     # ---------- people ----------
@@ -161,11 +170,21 @@ class ReminderManager:
     def number_for_person(self, person: str) -> str | None:
         return next((n for n, p in self._people.items() if p == person), None)
 
+    def person_for_chat(self, chat_id: str | int) -> str | None:
+        return self._tg_people.get(str(chat_id))
+
+    def chat_for_person(self, person: str) -> str | None:
+        return next((c for c, p in self._tg_people.items() if p == person), None)
+
+    def user_for_person(self, person: str | None) -> str | None:
+        state = self.hass.states.get(person) if person else None
+        return state.attributes.get("user_id") if state else None
+
     def person_for_user(self, user_id: str | None) -> str | None:
         """The mapped person whose HA user is ``user_id``."""
         if not user_id:
             return None
-        for person in self._people.values():
+        for person in dict.fromkeys([*self._people.values(), *self._tg_people.values()]):
             state = self.hass.states.get(person)
             if state and state.attributes.get("user_id") == user_id:
                 return person
@@ -402,16 +421,12 @@ class ReminderManager:
         reminder = self._reminders.get(rid)
         if reminder is None:
             return
-        number = self.number_for_person(reminder["person"])
-        client = self.hass.data.get(DOMAIN, {}).get("wa_client")
-        sent = False
-        if number and client is not None:
-            sent = await client.async_send_text(
-                number, _text(self.hass, "fire", text=reminder["text"])
-            )
+        sent = await self._async_deliver(
+            reminder["person"], _text(self.hass, "fire", text=reminder["text"])
+        )
         if not sent:
             _LOGGER.warning(
-                "Reminder %s could not be sent over WhatsApp; retrying in %s s",
+                "Reminder %s could not be delivered; retrying in %s s",
                 rid, REMINDER_RETRY_SECONDS,
             )
 
@@ -426,6 +441,22 @@ class ReminderManager:
         self._reminders.pop(rid, None)
         await self._async_save()
         _LOGGER.info("Reminder %s delivered", rid)
+
+    async def _async_deliver(self, person: str, body: str) -> bool:
+        """Send to every channel the person is reachable on; True if any worked."""
+        sent = False
+        number = self.number_for_person(person)
+        client = self.hass.data.get(DOMAIN, {}).get("wa_client")
+        if number and client is not None:
+            sent = await client.async_send_text(number, body)
+        chat = self.chat_for_person(person)
+        if chat:
+            from .telegram import async_send, telegram_enabled
+
+            options = self.hass.data.get(DOMAIN, {}).get("wa_options", {})
+            if telegram_enabled(options):
+                sent = await async_send(self.hass, chat, body) or sent
+        return sent
 
     # ---------- presentation ----------
 
