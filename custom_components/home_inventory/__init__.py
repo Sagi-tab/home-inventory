@@ -8,6 +8,7 @@ from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.loader import async_get_integration
 
 from .config_flow import new_webhook_id
@@ -35,6 +36,9 @@ from .telegram import async_setup_telegram, async_unload_telegram, parse_chats
 from .whatsapp import async_setup_whatsapp, async_unload_whatsapp
 
 _LOGGER = logging.getLogger(__name__)
+
+# Set up from the UI only; there is no YAML configuration.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
