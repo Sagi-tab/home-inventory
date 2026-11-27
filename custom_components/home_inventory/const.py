@@ -28,6 +28,8 @@ SERVICE_UPDATE_PRODUCT = "update_product"
 SERVICE_SEND_EXPIRY_ALERT = "send_expiry_alert"
 SERVICE_WA_DIAGNOSTICS = "whatsapp_diagnostics"
 SERVICE_PROCESS_RECEIPT = "process_receipt"
+SERVICE_CLEAR_SHOPPING = "clear_shopping_list"
+SERVICE_CLEAR_INVENTORY = "clear_inventory"
 
 # Event names
 EVENT_BARCODE_UNKNOWN = "home_inventory_barcode_unknown"

@@ -18,6 +18,8 @@ from .const import (
     LOCATIONS,
     SERVICE_ADD_ITEM,
     SERVICE_ADD_TO_SHOPPING,
+    SERVICE_CLEAR_INVENTORY,
+    SERVICE_CLEAR_SHOPPING,
     SERVICE_COMPLETE_SHOPPING,
     SERVICE_LOOKUP_BARCODE,
     SERVICE_REMOVE_ITEM,
@@ -606,6 +608,24 @@ def async_register_services(
         }),
         supports_response="optional",
     )
+
+    async def handle_clear_shopping(call: ServiceCall) -> dict:
+        removed = await db.clear_shopping()
+        _fire_changed(hass)
+        return {"removed": removed}
+
+    async def handle_clear_inventory(call: ServiceCall) -> dict:
+        removed = await db.clear_inventory()
+        _fire_changed(hass)
+        return {"removed": removed}
+
+    for service, handler in (
+        (SERVICE_CLEAR_SHOPPING, handle_clear_shopping),
+        (SERVICE_CLEAR_INVENTORY, handle_clear_inventory),
+    ):
+        hass.services.async_register(
+            DOMAIN, service, handler, schema=vol.Schema({}), supports_response="optional",
+        )
 
     async def handle_send_expiry_alert(call: ServiceCall) -> dict:
         # Imported here to keep the WhatsApp bridge optional at import time.

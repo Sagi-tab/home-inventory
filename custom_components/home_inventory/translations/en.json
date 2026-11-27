@@ -87,6 +87,14 @@
     "process_receipt": {
       "name": "Process receipt",
       "description": "Extract items from a receipt image file and add them"
+    },
+    "clear_shopping_list": {
+      "name": "Clear shopping list",
+      "description": "Delete every open item on the shopping list. Cannot be undone."
+    },
+    "clear_inventory": {
+      "name": "Clear inventory",
+      "description": "Delete every inventory row; known products and barcodes are kept. Cannot be undone."
     }
   }
 }

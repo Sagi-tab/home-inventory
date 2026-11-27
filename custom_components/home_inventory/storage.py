@@ -1086,6 +1086,27 @@ class Database:
         with self._connect() as conn:
             conn.execute("DELETE FROM shopping_list WHERE id = ?", (item_id,))
 
+    async def clear_shopping(self) -> int:
+        """Delete every open shopping list item. Returns how many were removed."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(self._clear_shopping)
+
+    def _clear_shopping(self) -> int:
+        with self._connect() as conn:
+            return conn.execute("DELETE FROM shopping_list WHERE completed = 0").rowcount
+
+    async def clear_inventory(self) -> int:
+        """Delete every inventory row (products and barcodes are kept).
+
+        Returns how many rows were removed.
+        """
+        async with self._lock:
+            return await self.hass.async_add_executor_job(self._clear_inventory)
+
+    def _clear_inventory(self) -> int:
+        with self._connect() as conn:
+            return conn.execute("DELETE FROM inventory").rowcount
+
     # ---------- Threshold ----------
 
     async def set_threshold(self, product_id: int, threshold: float) -> None:

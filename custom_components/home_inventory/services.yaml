@@ -421,3 +421,15 @@ update_shopping_quantity:
       name: New quantity (0 deletes)
       required: true
       selector: {number: {min: 0, step: 0.1, mode: box}}
+
+clear_shopping_list:
+  name: Clear shopping list
+  description: >
+    Delete every open item on the shopping list. Cannot be undone.
+
+clear_inventory:
+  name: Clear inventory
+  description: >
+    Delete every inventory row (quantities, locations, expiration dates and
+    low-stock thresholds). Known products and their barcodes are kept.
+    Cannot be undone.

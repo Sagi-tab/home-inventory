@@ -161,6 +161,15 @@ class HomeInventoryCard extends HTMLElement {
       console.error("refresh failed", e);
     }
   }
+  async _clearList(service, question) {
+    if (!confirm(question)) return;
+    try {
+      await this._callService("home_inventory", service, {});
+    } catch (e) {
+      alert(`Failed: ${e.message || e}`);
+    }
+    this._refresh();
+  }
   async _callService(domain, service, data, returnResponse = false) {
     return this._hass.callService(domain, service, data, undefined, true, returnResponse);
   }
@@ -224,7 +233,10 @@ class HomeInventoryCard extends HTMLElement {
     return Object.keys(groups).sort().map(cat => `
       <div class="group-header">${CATEGORY_LABELS[cat] || cat}</div>
       ${groups[cat].map(g => this._renderInventoryRow(g)).join("")}
-    `).join("");
+    `).join("") + (this._filter ? "" : this._clearButton("clear-inventory", "Clear inventory"));
+  }
+  _clearButton(act, label) {
+    return `<div class="clear-row"><button class="clear-btn" data-act="${act}">🗑 ${label}</button></div>`;
   }
   _renderInventoryRow(g) {
     const name = g.product_name_he || g.product_name;
@@ -343,7 +355,7 @@ class HomeInventoryCard extends HTMLElement {
           </div>
         </div>
       `).join("")}
-    `).join("");
+    `).join("") + this._clearButton("clear-shopping", "Clear shopping list");
   }
   _renderHistory() {
     if (!this._history.length && !this._stats.length) {
@@ -401,6 +413,10 @@ class HomeInventoryCard extends HTMLElement {
     const $$ = s => this.shadowRoot.querySelectorAll(s);
     (_$ = $("#scan")) === null || _$ === void 0 || _$.addEventListener("click", () => this._openScanner());
     (_$2 = $("#mode-toggle")) === null || _$2 === void 0 || _$2.addEventListener("click", () => this._setMode(this._mode === "stocking" ? "default" : "stocking"));
+    $$("[data-act='clear-shopping']").forEach(b => b.addEventListener("click", () => this._clearList(
+      "clear_shopping_list", `Remove all ${this._shopping.length} items from the shopping list? This can't be undone.`)));
+    $$("[data-act='clear-inventory']").forEach(b => b.addEventListener("click", () => this._clearList(
+      "clear_inventory", `Remove all ${this._inventoryGrouped.length} products from the inventory? Quantities, expiration dates and thresholds are deleted; known products and barcodes are kept. This can't be undone.`)));
     $$(".tab").forEach(b => b.addEventListener("click", () => {
       this._tab = b.dataset.tab;
       this._render();
@@ -2059,6 +2075,9 @@ class HomeInventoryCard extends HTMLElement {
         background: var(--card-background-color);
         flex: 1; min-width: 120px; max-width: 160px;
       }
+      .clear-row { display: flex; justify-content: center; padding: 16px 0 4px; }
+      .clear-btn { background: none; border: 1px solid var(--divider-color); color: var(--secondary-text-color); border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
+      .clear-btn:hover { color: #c33; border-color: #c33; }
       .empty { text-align: center; padding: 24px; color: var(--secondary-text-color); }
       .pill.multi {
         background: rgba(3,169,244,0.15);
